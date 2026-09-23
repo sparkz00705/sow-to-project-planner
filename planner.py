@@ -119,3 +119,161 @@ def validate_and_normalize_plan(plan: dict[str, Any]) -> dict[str, Any]:
         activity.setdefault("source_sow_ids", [])
         activity.setdefault("milestone", False)
     return result
+
+
+def merge_ai_seed_into_plan(base_plan: dict[str, Any], seed: dict[str, Any]) -> dict[str, Any]:
+    """Merge a compact AI planning seed into the deterministic full plan.
+
+    The AI is intentionally not asked for full traceability/WBS JSON because the
+    user's Groq org currently enforces a 1,000 output-token/minute limit. The
+    deterministic planner owns the full shape; the AI supplies domain/context
+    intelligence on top of it.
+    """
+    import copy
+    import re
+
+    result = copy.deepcopy(base_plan)
+    summary = result.setdefault("summary", {})
+    if seed.get("project_type"):
+        summary["project_type"] = str(seed["project_type"]).strip()
+    if seed.get("description"):
+        summary["description"] = str(seed["description"]).strip()
+    if seed.get("confidence"):
+        summary["confidence"] = str(seed["confidence"]).strip()
+
+    phase_rows = seed.get("phases") if isinstance(seed.get("phases"), list) else []
+    if phase_rows:
+        wbs = []
+        for idx, row in enumerate(phase_rows[:5], 1):
+            phase = str(row.get("phase", "")).strip()
+            if not phase:
+                continue
+            wbs.append({"wbs_id": str(idx), "phase": phase, "parent_wbs_id": ""})
+        if wbs:
+            result["wbs"] = wbs
+
+    # Normalize AI key activities. They become the lead activities, while the
+    # deterministic plan retains SOW-derived activities so every SOW statement
+    # still has a traceability path.
+    ai_activities = seed.get("key_activities") if isinstance(seed.get("key_activities"), list) else []
+    if ai_activities:
+        phases = [str(w.get("phase", "")) for w in result.get("wbs", [])]
+        lead = []
+        for idx, row in enumerate(ai_activities[:6], 1):
+            name = str(row.get("name", "")).strip()
+            if not name:
+                continue
+            phase = str(row.get("phase", "")).strip() or (phases[min(idx - 1, len(phases) - 1)] if phases else "Execution")
+            duration = row.get("duration_days", 5)
+            try:
+                duration = max(1, int(duration))
+            except Exception:
+                duration = 5
+            owner = str(row.get("owner_role", "Project Team")).strip() or "Project Team"
+            refs = row.get("source_indexes", []) if isinstance(row.get("source_indexes"), list) else []
+            actual_source_ids = []
+            for ref in refs:
+                try:
+                    ref_idx = int(ref)
+                except Exception:
+                    continue
+                if 1 <= ref_idx <= len(result.get("sow_items", [])):
+                    actual_source_ids.append(result["sow_items"][ref_idx - 1].get("sow_id"))
+            actual_source_ids = [x for x in actual_source_ids if x]
+            lead.append(
+                {
+                    "wbs_id": f"AI.{min(idx, 5)}",
+                    "activity_id": f"AI-ACT-{idx:03d}",
+                    "activity_name": name[:120],
+                    "phase": phase,
+                    "duration_days": duration,
+                    "dependency_ids": [f"AI-ACT-{idx-1:03d}"] if idx > 1 else [],
+                    "owner_role": owner[:80],
+                    "deliverable": name[:140],
+                    "milestone": False,
+                    "source_sow_ids": actual_source_ids[:3],
+                    "planning_note": "AI-generated planning recommendation; PM review required.",
+                }
+            )
+        if lead:
+            # Avoid overwhelming the plan. Keep AI lead activities first, then
+            # retain fallback activities for uncovered SOW statements.
+            existing = result.get("activities", [])
+            lead_names = {a["activity_name"].strip().lower() for a in lead}
+            remainder = [a for a in existing if a.get("activity_name", "").strip().lower() not in lead_names]
+            result["activities"] = lead + remainder
+
+            # Add AI activity IDs to the existing deterministic traceability map.
+            by_sow = {row.get("sow_id"): row for row in result.get("traceability", [])}
+            for activity in lead:
+                for sid in activity.get("source_sow_ids", []):
+                    row = by_sow.get(sid)
+                    if row is not None:
+                        ids = row.setdefault("activity_ids", [])
+                        if activity["activity_id"] not in ids:
+                            ids.append(activity["activity_id"])
+
+    seed_milestones = seed.get("milestones") if isinstance(seed.get("milestones"), list) else []
+    if seed_milestones:
+        milestones = []
+        for idx, item in enumerate(seed_milestones[:5], 1):
+            name = str(item.get("name", "")).strip()
+            target = str(item.get("target", "TBD")).strip() or "TBD"
+            if name:
+                milestones.append({
+                    "milestone_id": f"AI-MS-{idx:03d}",
+                    "name": name[:120],
+                    "target": target[:60],
+                    "source": "AI-generated planning recommendation; PM review required.",
+                })
+        if milestones:
+            result["milestones"] = milestones
+
+    # Keep deterministic traceability, but surface AI-suggested refs as review
+    # status where they point to statements that are not present in the local map.
+    seed_gaps = seed.get("gaps") if isinstance(seed.get("gaps"), list) else []
+    if seed_gaps:
+        gaps = result.setdefault("gaps", [])
+        existing_text = {str(g.get("description", "")).strip().lower() for g in gaps}
+        for idx, item in enumerate(seed_gaps[:4], 1):
+            text = str(item).strip()
+            if text and text.lower() not in existing_text:
+                gaps.append(
+                    {
+                        "gap_id": f"AI-GAP-{idx:03d}",
+                        "category": "AI review",
+                        "description": text[:240],
+                        "severity": "Review",
+                        "recommendation": "PM to validate before baselining.",
+                    }
+                )
+
+    seed_risks = seed.get("risks") if isinstance(seed.get("risks"), list) else []
+    if seed_risks:
+        risks = result.setdefault("risks", [])
+        existing_text = {str(r.get("risk", "")).strip().lower() for r in risks}
+        for idx, item in enumerate(seed_risks[:4], 1):
+            text = str(item).strip()
+            if text and text.lower() not in existing_text:
+                risks.append(
+                    {
+                        "risk_id": f"AI-RISK-{idx:03d}",
+                        "risk": text[:240],
+                        "impact": "Medium",
+                        "probability": "Medium",
+                        "mitigation": "PM to assess and assign an owner.",
+                    }
+                )
+
+    seed_assumptions = seed.get("assumptions") if isinstance(seed.get("assumptions"), list) else []
+    if seed_assumptions:
+        assumptions = result.setdefault("assumptions", [])
+        for item in seed_assumptions[:4]:
+            text = str(item).strip()
+            if text and text not in assumptions:
+                assumptions.append(text)
+
+    # Recalculate metadata after merge.
+    result.setdefault("metadata", {})
+    result["metadata"]["ai_seed_used"] = True
+    return result

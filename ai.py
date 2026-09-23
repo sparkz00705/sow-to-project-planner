@@ -32,12 +32,11 @@ PLAN_SCHEMA = {
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "project_name": {"type": "string"},
                 "project_type": {"type": "string"},
                 "description": {"type": "string"},
                 "confidence": {"type": "string"},
             },
-            "required": ["project_name", "project_type", "description", "confidence"],
+            "required": ["project_type", "description", "confidence"],
         },
         "scope": {
             "type": "object",
@@ -48,153 +47,35 @@ PLAN_SCHEMA = {
             },
             "required": ["in_scope", "out_of_scope"],
         },
-        "sow_items": {
+        "phases": {"type": "array", "items": {"type": "string"}},
+        "key_activities": {
             "type": "array",
             "items": {
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
-                    "sow_id": {"type": "string"},
-                    "statement": {"type": "string"},
-                    "type": {"type": "string"},
-                    "explicit": {"type": "boolean"},
-                    "priority": {"type": "string"},
-                },
-                "required": ["sow_id", "statement", "type", "explicit", "priority"],
-            },
-        },
-        "wbs": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "wbs_id": {"type": "string"},
-                    "phase": {"type": "string"},
-                    "parent_wbs_id": {"type": "string"},
-                },
-                "required": ["wbs_id", "phase", "parent_wbs_id"],
-            },
-        },
-        "activities": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "wbs_id": {"type": "string"},
-                    "activity_id": {"type": "string"},
-                    "activity_name": {"type": "string"},
+                    "name": {"type": "string"},
                     "phase": {"type": "string"},
                     "duration_days": {"type": "integer"},
-                    "dependency_ids": {"type": "array", "items": {"type": "string"}},
-                    "owner_role": {"type": "string"},
-                    "deliverable": {"type": "string"},
-                    "milestone": {"type": "boolean"},
-                    "source_sow_ids": {"type": "array", "items": {"type": "string"}},
-                    "planning_note": {"type": "string"},
                 },
-                "required": [
-                    "wbs_id", "activity_id", "activity_name", "phase", "duration_days",
-                    "dependency_ids", "owner_role", "deliverable", "milestone", "source_sow_ids", "planning_note"
-                ],
-            },
-        },
-        "milestones": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "milestone_id": {"type": "string"},
-                    "name": {"type": "string"},
-                    "target": {"type": "string"},
-                    "source": {"type": "string"},
-                },
-                "required": ["milestone_id", "name", "target", "source"],
+                "required": ["name", "phase", "duration_days"],
             },
         },
         "assumptions": {"type": "array", "items": {"type": "string"}},
         "constraints": {"type": "array", "items": {"type": "string"}},
-        "gaps": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "gap_id": {"type": "string"},
-                    "category": {"type": "string"},
-                    "description": {"type": "string"},
-                    "severity": {"type": "string"},
-                    "recommendation": {"type": "string"},
-                },
-                "required": ["gap_id", "category", "description", "severity", "recommendation"],
-            },
-        },
-        "risks": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "risk_id": {"type": "string"},
-                    "risk": {"type": "string"},
-                    "impact": {"type": "string"},
-                    "probability": {"type": "string"},
-                    "mitigation": {"type": "string"},
-                },
-                "required": ["risk_id", "risk", "impact", "probability", "mitigation"],
-            },
-        },
-        "traceability": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "sow_id": {"type": "string"},
-                    "activity_ids": {"type": "array", "items": {"type": "string"}},
-                    "status": {"type": "string"},
-                    "reason": {"type": "string"},
-                },
-                "required": ["sow_id", "activity_ids", "status", "reason"],
-            },
-        },
-        "metadata": {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "engine": {"type": "string"},
-                "source_characters": {"type": "integer"},
-                "model": {"type": "string"},
-            },
-            "required": ["engine", "source_characters", "model"],
-        },
+        "gaps": {"type": "array", "items": {"type": "string"}},
+        "risks": {"type": "array", "items": {"type": "string"}},
     },
     "required": [
-        "summary", "scope", "sow_items", "wbs", "activities", "milestones",
-        "assumptions", "constraints", "gaps", "risks", "traceability", "metadata"
+        "summary", "scope", "phases", "key_activities",
+        "assumptions", "constraints", "gaps", "risks"
     ],
 }
 
 
 SYSTEM_PROMPT = """
-You are a senior project/program management planning architect.
-Transform a Statement of Work (SOW) into a domain-agnostic project plan.
-
-Rules:
-1. Separate what the SOW explicitly states from what you infer or propose.
-2. Never invent a customer commitment, date, budget, resource, or contractual requirement.
-3. When the SOW is silent, create a planning proposal and clearly mark it in planning_note or assumptions.
-4. Extract every meaningful SOW scope/deliverable statement and give it a stable SOW ID.
-5. Build a logical WBS and activities suitable for PM review.
-6. Create reasonable predecessor relationships only when supported by normal project sequencing; explain inferred sequencing in planning_note.
-7. Map each SOW item to one or more activities. If it cannot be mapped confidently, mark the traceability status as Unmapped or Review.
-8. Identify gaps that would prevent a PM from confidently baselining the plan.
-9. Identify planning risks arising from ambiguity, dependencies, missing ownership, missing acceptance criteria, or schedule constraints.
-10. Keep the output usable across any industry/domain.
-11. Preserve dates, quantities, locations, deliverables and acceptance wording from the SOW where present.
-12. Do not produce a generic methodology dump; derive the plan from the actual SOW content.
+You are a senior project/program management planning architect. Analyze the SOW and return ONLY the compact JSON requested.
+Rules: distinguish explicit SOW facts from planning proposals; never invent contractual commitments; derive the project type and phases from the SOW; identify key activities, gaps and risks; keep each text item short. Return at most 5 phases, 8 key activities, 5 in-scope items, 5 out-of-scope items, 4 assumptions, 4 constraints, 5 gaps and 5 risks.
 """.strip()
 
 
@@ -207,20 +88,115 @@ def _parse_content(content: str) -> dict[str, Any]:
     return json.loads(text)
 
 
+def _expand_seed_to_plan(seed: dict[str, Any], sow_text: str, project_name: str, model: str) -> dict[str, Any]:
+    from planner import build_fallback_plan
+
+    base = build_fallback_plan(sow_text, project_name)
+    summary = seed.get("summary", {}) if isinstance(seed.get("summary"), dict) else {}
+    base["summary"] = {
+        "project_name": project_name,
+        "project_type": summary.get("project_type", "Other / To be confirmed"),
+        "description": summary.get("description", "AI-assisted project plan generated from SOW text."),
+        "confidence": summary.get("confidence", "Medium"),
+    }
+    base["scope"] = {
+        "in_scope": seed.get("scope", {}).get("in_scope", []),
+        "out_of_scope": seed.get("scope", {}).get("out_of_scope", []),
+    }
+
+    phases = seed.get("phases") or []
+    if phases:
+        base["wbs"] = []
+        for i, phase in enumerate(phases[:5], 1):
+            base["wbs"].append({
+                "wbs_id": str(i),
+                "phase": str(phase),
+                "parent_wbs_id": "",
+            })
+    else:
+        base["wbs"] = [
+            {"wbs_id": str(i), "phase": phase, "parent_wbs_id": ""}
+            for i, phase in enumerate([
+                "Initiation & Planning", "Requirements & Design",
+                "Execution", "Testing & Acceptance", "Deployment & Closure"
+            ], 1)
+        ]
+
+    ai_activities = seed.get("key_activities") or []
+    if ai_activities:
+        activities = []
+        for i, item in enumerate(ai_activities[:8], 1):
+            if not isinstance(item, dict):
+                continue
+            phase = str(item.get("phase") or (phases[min(i-1, len(phases)-1)] if phases else "Execution"))
+            wbs_id = next(
+                (w["wbs_id"] for w in base["wbs"] if str(w["phase"]).lower() == phase.lower()),
+                str(min(i, len(base["wbs"]) or 1)),
+            )
+            aid = f"AI-ACT-{i:03d}"
+            activities.append({
+                "wbs_id": wbs_id,
+                "activity_id": aid,
+                "activity_name": str(item.get("name") or f"AI planning activity {i}"),
+                "phase": phase,
+                "duration_days": max(1, min(int(item.get("duration_days", 5)), 60)),
+                "dependency_ids": [f"AI-ACT-{i-1:03d}"] if i > 1 else [],
+                "owner_role": "Project Team",
+                "deliverable": "Planning deliverable / PM review",
+                "milestone": False,
+                "source_sow_ids": [],
+                "planning_note": "AI-proposed activity derived from the SOW; PM validation required.",
+            })
+        if activities:
+            base["activities"] = activities
+            base["traceability"] = []
+            for item in base.get("sow_items", []):
+                base["traceability"].append({
+                    "sow_id": item["sow_id"],
+                    "activity_ids": [a["activity_id"] for a in activities[:3]],
+                    "status": "Review",
+                    "reason": "Compact AI planning pass did not retain item-level source IDs; PM should validate mapping.",
+                })
+
+    base["assumptions"] = seed.get("assumptions") or base.get("assumptions", [])
+    base["constraints"] = seed.get("constraints") or base.get("constraints", [])
+    base["gaps"] = [
+        {
+            "gap_id": f"AI-GAP-{i:03d}",
+            "category": "AI planning review",
+            "description": text,
+            "severity": "Medium",
+            "recommendation": "PM to clarify before baselining.",
+        }
+        for i, text in enumerate((seed.get("gaps") or [])[:5], 1)
+    ] or base.get("gaps", [])
+    base["risks"] = [
+        {
+            "risk_id": f"AI-RISK-{i:03d}",
+            "risk": text,
+            "impact": "Project delivery impact",
+            "probability": "Medium",
+            "mitigation": "Assign an owner and monitor through RAID governance.",
+        }
+        for i, text in enumerate((seed.get("risks") or [])[:5], 1)
+    ]
+    base["metadata"] = {
+        "engine": "groq_ai_assisted_compact",
+        "source_characters": len(sow_text),
+        "model": model,
+    }
+    return base
+
+
 def generate_plan_with_groq(sow_text: str, project_name: str, config: GroqConfig) -> dict[str, Any]:
     if not config.api_key:
         raise RuntimeError("Groq API key is missing.")
 
-    user_prompt = f"""
-Project name: {project_name}
-
-SOW TEXT:
----
+    user_prompt = f"""Project: {project_name}
+SOW:
 {sow_text}
----
 
-Generate the complete project-planning JSON according to the required schema.
-""".strip()
+Return a compact planning seed. Do not generate the full project plan. Keep the JSON concise so the response remains below 700 output tokens.""".strip()
 
     payload = {
         "model": config.model,
@@ -229,28 +205,20 @@ Generate the complete project-planning JSON according to the required schema.
             {"role": "user", "content": user_prompt},
         ],
         "temperature": 0.2,
-        "max_completion_tokens": 7000,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "sow_project_plan",
-                "strict": True,
-                "schema": PLAN_SCHEMA,
-            },
-        },
+        "reasoning_effort": "none",
+        "include_reasoning": False,
+        "max_completion_tokens": 700,
+        "response_format": {"type": "json_schema", "json_schema": {"name": "sow_planning_seed", "strict": True, "schema": PLAN_SCHEMA}},
     }
 
     headers = {
         "Authorization": f"Bearer {config.api_key}",
         "Content-Type": "application/json",
-        "X-Title": "SOW Project Planner",
     }
-
     url = f"{config.base_url}/chat/completions"
     response = requests.post(url, headers=headers, json=payload, timeout=config.timeout_seconds)
     if not response.ok:
-        detail = response.text[:2000]
-        raise RuntimeError(f"Groq HTTP {response.status_code}: {detail}")
+        raise RuntimeError(f"Groq HTTP {response.status_code}: {response.text[:2000]}")
 
     body = response.json()
     choices = body.get("choices") or []
@@ -260,9 +228,6 @@ Generate the complete project-planning JSON according to the required schema.
     if not content:
         raise RuntimeError("Groq returned an empty model response.")
 
-    plan = _parse_content(content)
-    plan.setdefault("metadata", {})
-    plan["metadata"]["engine"] = "groq"
-    plan["metadata"]["source_characters"] = len(sow_text)
-    plan["metadata"]["model"] = config.model
-    return plan
+    seed = _parse_content(content)
+    return _expand_seed_to_plan(seed, sow_text, project_name, config.model)
+

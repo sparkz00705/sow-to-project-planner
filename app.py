@@ -257,13 +257,20 @@ def main() -> None:
                 try:
                     plan = generate_plan_with_openrouter(extracted_text, project_name, or_cfg)
                     engine = "AI planner"
-                except Exception:
-                    st.warning("AI planning was unavailable, so the built-in planner was used instead.")
+                    st.success("AI planner completed successfully.")
+                except Exception as exc:
+                    # Show a safe diagnostic without exposing API credentials.
+                    message = str(exc).replace(or_cfg.api_key, "[redacted]")
+                    if len(message) > 1000:
+                        message = message[:1000] + "..."
+                    st.error(f"AI planner failed: {message}")
+                    st.warning("The built-in planner was used as a fallback. The result below is not an AI-generated plan.")
                     plan = build_fallback_plan(extracted_text, project_name)
-                    engine = "Built-in planner"
+                    engine = "Built-in fallback"
             else:
+                st.warning("AI planner is not configured. The built-in planner was used.")
                 plan = build_fallback_plan(extracted_text, project_name)
-                engine = "Built-in planner"
+                engine = "Built-in fallback"
 
             plan = validate_and_normalize_plan(plan)
             project_id = create_project(

@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 import hashlib
 import re
-from difflib import SequenceMatcher
 from typing import Any
 
 
@@ -12,557 +11,723 @@ def _id(prefix: str, text: str, index: int) -> str:
     return f"{prefix}-{index:03d}-{h}"
 
 
-def _norm(text: str) -> str:
-    return re.sub(r"[^a-z0-9 ]+", " ", text.lower()).strip()
+def _clean(text: Any) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip(" ;,.-")
 
 
-def _split_list(text: str) -> list[str]:
-    parts = re.split(r";|\n|\|", text)
-    return [p.strip(" -•\t") for p in parts if p.strip(" -•\t")]
-
-
-def _classify_section(title: str, body: str) -> tuple[str, bool]:
-    t = _norm(title)
-    b = _norm(body)
-    if "out of scope" in t:
-        return "Out of Scope", True
-    if "deliverable" in t:
-        return "Deliverable", True
-    if "milestone" in t:
-        return "Milestone", True
-    if "dependency" in t:
-        return "Dependency", True
-    if "risk" in t or "constraint" in t:
-        return "Risk / Constraint", True
-    if "acceptance" in t:
-        return "Acceptance", True
-    if "responsibilit" in t:
-        return "Responsibility", True
-    if "assumption" in t or "commercial" in t or "schedule" in t:
-        return "Assumption", True
-    if "purpose" in t or "objective" in t:
-        return "Objective", True
-    if "workstream" in t or "scope" in t:
-        return "Scope / Workstream", True
-    # Generic prose: keep it as contextual SOW content, not as a task.
-    return "Context", False
-
-
-def parse_sow_items(sow_text: str) -> list[dict[str, Any]]:
-    """Convert an SOW into typed source items without turning every sentence into a task."""
-    lines = [line.strip() for line in sow_text.splitlines()]
-    sections: list[tuple[str, str]] = []
-    current_title = "SOW Context"
-    current: list[str] = []
-
-    heading_re = re.compile(r"^(?:section\s+)?(\d+)[\.)]\s*(.+)$", re.I)
+def _sectionize(sow_text: str) -> list[tuple[str, str]]:
+    lines = [x.strip() for x in sow_text.splitlines() if x.strip()]
+    chunks: list[tuple[str, str]] = []
+    current: str | None = None
+    buffer: list[str] = []
     for line in lines:
-        if not line:
-            continue
-        m = heading_re.match(line)
-        if m:
-            if current:
-                sections.append((current_title, " ".join(current).strip()))
-            current_title = f"{m.group(1)}. {m.group(2).strip() }"
-            current = []
+        normalized = re.sub(r"^\d+[.)]\s+", "", line).strip()
+        heading = False
+        if re.match(r"^Workstream\s+[A-Za-z0-9]+\s*[-:]", line, re.I):
+            heading = True
+        elif re.match(r"^\d+[.)]\s+[A-Za-z].*", line):
+            heading = True
+        elif normalized.lower() in {
+            "purpose", "objectives", "scope", "in scope", "out of scope", "geography and functions",
+            "major deliverables", "milestones", "dependencies", "responsibilities", "commercial assumptions",
+            "schedule assumptions", "acceptance criteria", "risks and constraints", "deliberate clarifications",
+        }:
+            heading = True
+        if heading:
+            if current is not None and buffer:
+                chunks.append((current, _clean(" ".join(buffer))))
+            current = normalized
+            buffer = []
         else:
-            current.append(line)
-    if current:
-        sections.append((current_title, " ".join(current).strip()))
-
-    if not sections:
-        sections = [("SOW Content", " ".join(x.strip() for x in lines if x.strip()))]
-
-    items: list[dict[str, Any]] = []
-    counter = 1
-    for title, body in sections:
-        if not body and not title:
-            continue
-        item_type, explicit = _classify_section(title, body)
-        content = f"{title}: {body}" if body else title
-        items.append(
-            {
-                "sow_id": _id("SOW", content, counter),
-                "statement": body or title,
-                "section": title,
-                "type": item_type,
-                "explicit": explicit,
-                "priority": "High" if item_type in {"Scope / Workstream", "Deliverable", "Milestone", "Acceptance"} else "Medium",
-            }
-        )
-        counter += 1
-
-    return items
+            if current is None:
+                current = "General"
+            buffer.append(line)
+    if current is not None and buffer:
+        chunks.append((current, _clean(" ".join(buffer))))
+    return [(s, t) for s, t in chunks if t]
 
 
-def _workstream_key(section: str, statement: str) -> str:
-    text = _norm(f"{section} {statement}")
-    patterns = [
-        ("governance", "Governance"),
-        ("project management", "Governance"),
-        ("discovery", "Discovery & Requirements"),
-        ("requirements", "Discovery & Requirements"),
-        ("future state", "Process Design"),
-        ("process design", "Process Design"),
-        ("solution design", "Solution Design & Configuration"),
-        ("configuration", "Solution Design & Configuration"),
-        ("erp integration", "Integration"),
-        ("integration", "Integration"),
-        ("identity", "Identity & Access"),
-        ("access management", "Identity & Access"),
-        ("document management", "Document Management"),
-        ("data migration", "Data Migration"),
-        ("migration", "Data Migration"),
-        ("testing", "Testing & Acceptance"),
-        ("quality", "Testing & Acceptance"),
-        ("training", "Training & Change"),
-        ("change management", "Training & Change"),
-        ("deployment", "Deployment & Cutover"),
-        ("cutover", "Deployment & Cutover"),
-        ("hypercare", "Hypercare & Handover"),
-        ("handover", "Hypercare & Handover"),
-    ]
-    for token, phase in patterns:
-        if token in text:
-            return phase
-    return "General Delivery"
+def _key(section: str) -> str:
+    return re.sub(r"^\d+[.)]\s*", "", section.lower().strip())
 
 
-def _activity_templates(phase: str, statement: str) -> list[str]:
-    s = _norm(statement)
-    templates: dict[str, list[str]] = {
-        "Governance": [
-            "Project kickoff and charter approval",
-            "Establish governance, RAID, decisions and change control",
-            "Integrated schedule, status reporting and steering reviews",
-        ],
-        "Discovery & Requirements": [
-            "Stakeholder discovery and current-state assessment",
-            "Requirements workshops and requirements catalogue",
-            "Requirements validation and business sign-off",
-        ],
-        "Process Design": [
-            "Future-state process and workflow design",
-            "Roles, approvals, exceptions and escalation design",
-            "Future-state design review and approval",
-        ],
-        "Solution Design & Configuration": [
-            "Solution architecture and environment readiness",
-            "Platform, workflow and business-rule configuration",
-            "Configuration validation and design baseline",
-        ],
-        "Integration": [
-            "Interface design and source/target mapping",
-            "Integration development and system connectivity",
-            "Integration testing and reconciliation",
-        ],
-        "Identity & Access": [
-            "Identity and access design",
-            "SSO, provisioning and role mapping configuration",
-            "Access validation and privileged-access review",
-        ],
-        "Document Management": [
-            "Document integration and metadata mapping",
-            "Document upload/retrieval and permission configuration",
-            "Document integration testing and validation",
-        ],
-        "Data Migration": [
-            "Source data profiling and migration scope confirmation",
-            "Data mapping, cleansing and transformation rules",
-            "Trial migration, reconciliation and business validation",
-            "Production data migration and reconciliation",
-        ],
-        "Testing & Acceptance": [
-            "Test strategy, test cases and environment readiness",
-            "System Integration Testing and defect resolution",
-            "Performance and security testing coordination",
-            "User Acceptance Testing and business sign-off",
-        ],
-        "Training & Change": [
-            "Training and change-readiness plan",
-            "Training materials, delivery and site readiness",
-        ],
-        "Deployment & Cutover": [
-            "Cutover planning and go-live readiness",
-            "Production deployment Wave 1 and stabilization",
-            "Production deployment Wave 2 and stabilization",
-            "Production deployment Wave 3 and stabilization",
-        ],
-        "Hypercare & Handover": [
-            "Hypercare incident and defect management",
-            "Knowledge transfer and operational handover",
-            "Project closure and outstanding-action transition",
-        ],
-        "General Delivery": [
-            "Detailed scope analysis and delivery planning",
-            "Execute agreed work package",
-            "Validate deliverable and obtain stakeholder acceptance",
-        ],
-    }
-    rows = templates.get(phase, templates["General Delivery"])
+def _is_workstream(section: str) -> bool:
+    return section.lower().startswith("workstream")
 
-    # Keep only activities that are supported by the section where possible.
-    # For a generic domain, all three are reasonable planning decompositions.
-    if phase == "Deployment & Cutover" and "three wave" not in s and "three waves" not in s:
-        return rows[:2]
+
+def _workstream_name(section: str) -> str:
+    m = re.match(r"Workstream\s+[A-Za-z0-9]+\s*[-:]\s*(.+)", section, re.I)
+    return _clean(m.group(1) if m else section)
+
+
+def _list_split(text: str, mode: str) -> list[str]:
+    """Split only where the SOW structure supports itemization."""
+    text = text.replace("•", "\n").replace("\r", "\n")
+    if mode in {"semicolon", "sentence"}:
+        pattern = r";|\n+" if mode == "semicolon" else r"(?<=[.!?])\s+|\n+"
+        return [_clean(x) for x in re.split(pattern, text) if _clean(x)]
+    return [_clean(x) for x in re.split(r"\n+", text) if _clean(x)]
+
+
+def _section_items(section: str, text: str) -> list[str]:
+    s = _key(section)
+    if _is_workstream(section):
+        # Keep the workstream as one source item. Activity decomposition happens separately.
+        return [text]
+    if "major deliverables" in s or s == "milestones" or s == "dependencies" or "risks and constraints" in s or "schedule assumptions" in s or "in scope" == s or "out of scope" == s or s == "objectives":
+        return _list_split(text, "semicolon")
+    if "deliberate clarifications" in s or "acceptance criteria" in s or "purpose" in s:
+        return _list_split(text, "sentence")
+    if "responsibilities" in s:
+        # Preserve Client / Partner responsibility blocks as two source items.
+        pieces = re.split(r"(?=(?:Client|Implementation Partner)\s*:)", text)
+        return [_clean(x) for x in pieces if _clean(x)]
+    return [text]
+
+
+def _classify(section: str, text: str) -> tuple[str, str, bool]:
+    s = _key(section)
+    low = text.lower()
+    if "out of scope" == s:
+        return "Out of Scope", "Reference", False
+    if "major deliverables" in s:
+        return "Deliverable", "Reference", False
+    if s == "milestones":
+        return "Milestone", "Control", False
+    if s == "dependencies":
+        return "Dependency", "Constraint", False
+    if s == "responsibilities":
+        return "Responsibility", "Reference", False
+    if "commercial assumptions" in s:
+        return "Commercial Assumption", "Assumption", False
+    if "schedule assumptions" in s:
+        return "Schedule Assumption", "Assumption", False
+    if "acceptance criteria" in s:
+        return "Acceptance Criterion", "Control", False
+    if "risks and constraints" in s:
+        return "Risk / Constraint", "Risk / Constraint", False
+    if "deliberate clarifications" in s or "not defined" in low or "does not define" in low or "no numerical target" in low or "no entry/exit criteria" in low:
+        return "Clarification / Gap", "Gap", False
+    if "purpose" in s or "objective" in s:
+        return "Objective", "Scope", False
+    if s == "in scope" or _is_workstream(section):
+        return "Scope / Activity", "Executable", True
+    return "Reference", "Reference", False
+
+
+def _priority(text: str, item_type: str) -> str:
+    low = text.lower()
+    if any(k in low for k in ["go-live", "production", "security", "acceptance", "sign-off", "critical"]):
+        return "High"
+    if item_type in {"Deliverable", "Milestone", "Dependency", "Clarification / Gap"}:
+        return "High"
+    return "Medium"
+
+
+def _parse_sow_items(sow_text: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    n = 1
+    for section, text in _sectionize(sow_text):
+        for piece in _section_items(section, text):
+            if len(piece) < 10:
+                continue
+            typ, category, executable = _classify(section, piece)
+            sid = _id("SOW", f"{section}:{piece}", n)
+            rows.append({
+                "sow_id": sid,
+                "section": section,
+                "statement": piece,
+                "type": typ,
+                "category": category,
+                "executable": executable,
+                "explicit": True,
+                "priority": _priority(piece, typ),
+            })
+            n += 1
     return rows
 
 
-def _extract_explicit_milestones(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    milestones: list[dict[str, Any]] = []
-    for item in items:
-        if item.get("type") != "Milestone":
-            continue
-        for name, week in re.findall(r"([^;]+?)\s+Week\s+(\d+)", item.get("statement", ""), flags=re.I):
-            milestones.append(
-                {
-                    "milestone_id": f"MS-{len(milestones)+1:03d}",
-                    "name": name.strip(" ;"),
-                    "target": f"Week {week}",
-                    "source": "Explicit SOW milestone",
-                }
-            )
-    if milestones:
-        return milestones
-    return [
-        {"milestone_id": "MS-001", "name": "Project kickoff", "target": "TBD", "source": "Planning proposal"},
-        {"milestone_id": "MS-002", "name": "Requirements baseline", "target": "TBD", "source": "Planning proposal"},
-        {"milestone_id": "MS-003", "name": "UAT / business acceptance", "target": "TBD", "source": "Planning proposal"},
-        {"milestone_id": "MS-004", "name": "Production go-live / handover", "target": "TBD", "source": "Planning proposal"},
+def _phase_map(name: str) -> tuple[str, str]:
+    low = name.lower()
+    pairs = [
+        ("project management", "Initiation & Governance", "Establish governance, controls and delivery cadence."),
+        ("discovery", "Discovery & Requirements", "Understand current state and baseline requirements."),
+        ("future-state", "Future-State Process Design", "Design target processes, roles and controls."),
+        ("solution design", "Solution Design & Configuration", "Design the solution and configure environments."),
+        ("configuration", "Solution Design & Configuration", "Configure the solution and required environments."),
+        ("erp integration", "Integration & Interfaces", "Build and validate enterprise interfaces."),
+        ("identity", "Security & Access", "Implement identity, access and security controls."),
+        ("access management", "Security & Access", "Implement identity, access and security controls."),
+        ("document management", "Content & Document Integration", "Integrate document/content services."),
+        ("data migration", "Data Migration", "Profile, transform, migrate and reconcile data."),
+        ("testing", "Testing & Acceptance", "Validate functional, integration, performance and acceptance requirements."),
+        ("training", "Change & Training", "Prepare users, support teams and adoption materials."),
+        ("deployment", "Deployment & Cutover", "Prepare and execute production rollout."),
+        ("hypercare", "Hypercare & Handover", "Stabilize the solution and complete operational transition."),
     ]
+    for key, phase, purpose in pairs:
+        if key in low:
+            return phase, purpose
+    return _clean(name) or "Delivery Workstream", "Deliver the workstream scope stated in the SOW."
 
 
-def _extract_gaps(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    gaps: list[dict[str, Any]] = []
-    texts = " ".join(i.get("statement", "") for i in items)
-    normalized = _norm(texts)
-    checks = [
-        ("complete audit history", "Acceptance / scope", "Define exactly which transactions, fields, events and retention period constitute complete audit history."),
-        ("no numerical target", "Performance", "Define measurable performance targets, workload and acceptance thresholds."),
-        ("not define exact", "Data", "Confirm data volumes, record counts and migration boundaries."),
-        ("not stated", "Security", "Clarify ownership for penetration testing and security remediation."),
-        ("15%", "Process variation", "Define the measurement method for the local-variation threshold."),
-        ("severity 2", "Defect acceptance", "Define the maximum permitted Severity 2 defects and formal waiver authority at go-live."),
-        ("smoke testing", "Go-live", "Define business smoke-test entry/exit criteria and evidence requirements."),
-        ("subject to", "Scope / Change", "Define the decision process and schedule/cost impact for conditional scope additions."),
-    ]
-    for needle, category, rec in checks:
-        if needle in normalized:
-            gaps.append(
-                {
-                    "gap_id": f"GAP-{len(gaps)+1:03d}",
-                    "category": category,
-                    "description": rec,
-                    "severity": "Review",
-                    "recommendation": "PM to clarify before baselining.",
-                }
-            )
-    return gaps
+def _normalize_activity(phrase: str, phase: str) -> str:
+    p = _clean(phrase)
+    if not p:
+        return ""
+    p = re.sub(r"^(activities include|scope includes|the project will|the solution will)\s+", "", p, flags=re.I)
+    if re.match(r"^(establish|maintain|conduct|assess|create|define|design|configure|implement|integrate|migrate|perform|execute|train|deliver|deploy|provide|complete|validate|obtain|prepare|develop|support|transition|reconcile|map|profile|cleanse|build|approve|review|plan|coordinate|test)\b", p, re.I):
+        return p.rstrip(".")
+    verb = {
+        "Initiation & Governance": "Establish",
+        "Discovery & Requirements": "Conduct",
+        "Future-State Process Design": "Design",
+        "Solution Design & Configuration": "Configure",
+        "Integration & Interfaces": "Implement",
+        "Security & Access": "Implement",
+        "Content & Document Integration": "Integrate",
+        "Data Migration": "Prepare",
+        "Testing & Acceptance": "Execute",
+        "Change & Training": "Prepare",
+        "Deployment & Cutover": "Prepare",
+        "Hypercare & Handover": "Complete",
+    }.get(phase, "Complete")
+    return f"{verb} {p[0].lower() + p[1:] if p else p}".rstrip(".")
 
 
-def _extract_risks(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    risks: list[dict[str, Any]] = []
-    for item in items:
-        if item.get("type") != "Risk / Constraint":
-            continue
-        for text in _split_list(item.get("statement", "")):
-            if len(text) < 8:
+def _workstream_activity_phrases(section: str, text: str, phase: str) -> list[str]:
+    candidates: list[str] = []
+    sentences = [x.strip() for x in re.split(r"(?<=[.!?])\s+", text) if x.strip()]
+    for sentence in sentences:
+        # Workstream clauses are usually semicolon-delimited actions.
+        for part in re.split(r";", sentence):
+            part = _clean(part)
+            if not part:
                 continue
-            risks.append(
-                {
-                    "risk_id": f"RISK-{len(risks)+1:03d}",
-                    "risk": text,
-                    "impact": "Medium",
-                    "probability": "Medium",
-                    "mitigation": "Assess, assign owner and track in the project RAID log.",
-                }
-            )
-    return risks
-
-
-def _extract_scope(items: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
-    in_scope: list[str] = []
-    out_scope: list[str] = []
-    for item in items:
-        if item.get("type") not in {"Scope / Workstream", "Out of Scope"}:
+            low = part.lower()
+            # Exclude obligations/constraints that are not executable work.
+            if any(x in low for x in [
+                "may require", "above this threshold", "the client will provide", "the client owns",
+                "the implementation partner is not responsible", "remains with the existing",
+                "subject to schedule", "unless formally waived",
+            ]):
+                continue
+            # Split clearly enumerated activity lists, but don't split ordinary prose.
+            if part.count(",") >= 2 and len(part) < 200 and not any(v in low for v in ["not defined", "does not define"]):
+                chunks = [_clean(x) for x in part.split(",") if _clean(x)]
+                # Strip conjunctions from the final chunk where possible.
+                if 2 <= len(chunks) <= 6:
+                    candidates.extend(_normalize_activity(x, phase) for x in chunks)
+                    continue
+            candidates.append(_normalize_activity(part, phase))
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        item = _clean(item)
+        if len(item) < 12:
             continue
-        parts = _split_list(item.get("statement", ""))
-        if item.get("type") == "Out of Scope":
-            out_scope.extend(parts)
-        else:
-            in_scope.extend(parts)
-    return in_scope, out_scope
+        key = re.sub(r"[^a-z0-9]+", " ", item.lower()).strip()
+        if key not in seen:
+            seen.add(key)
+            out.append(item)
+    return out[:10]
 
 
-def _make_activities(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    activities: list[dict[str, Any]] = []
-    trace_map: dict[str, list[str]] = {i["sow_id"]: [] for i in items}
-    workstream_items = [i for i in items if "workstream" in _norm(i.get("section", ""))]
-    if not workstream_items:
-        # Generic domain-agnostic planning when the SOW has no explicit workstreams.
-        workstream_items = [i for i in items if i.get("type") == "Scope / Workstream"][:8]
+def _owner_for(phase: str, activity: str) -> str:
+    low = activity.lower()
+    if any(k in low for k in ["uat", "requirements", "acceptance", "approval", "sign-off"]):
+        return "Business / Product Owner"
+    if any(k in low for k in ["integration", "api", "configuration", "migration", "sso", "security", "environment"]):
+        return "Technical Lead"
+    if any(k in low for k in ["test", "defect", "regression", "performance"]):
+        return "Test Lead"
+    if any(k in low for k in ["training", "change", "knowledge transfer"]):
+        return "Change / Training Lead"
+    if any(k in low for k in ["deploy", "cutover", "go-live", "hypercare"]):
+        return "Deployment Lead"
+    if "governance" in low or "charter" in low:
+        return "Project Manager"
+    return "Workstream Lead"
 
-    previous_by_phase: dict[str, str] = {}
-    for item in workstream_items:
-        phase = _workstream_key(item.get("section", ""), item.get("statement", ""))
-        templates = _activity_templates(phase, item.get("statement", ""))
-        for template in templates:
-            idx = len(activities) + 1
-            aid = f"ACT-{idx:03d}-{hashlib.sha1(template.encode()).hexdigest()[:6].upper()}"
-            dep = []
-            if phase in previous_by_phase:
-                dep = [previous_by_phase[phase]]
-            else:
-                # Link each workstream to the most recently created activity from another phase.
-                if activities:
-                    dep = [activities[-1]["activity_id"]]
-            activity = {
-                "wbs_id": "",
-                "activity_id": aid,
-                "activity_name": template,
-                "phase": phase,
-                "duration_days": 5,
-                "dependency_ids": dep,
-                "owner_role": "Project Team",
-                "deliverable": template,
-                "milestone": False,
+
+def _duration(activity: str, phase: str) -> int:
+    low = activity.lower()
+    base = {
+        "Initiation & Governance": 5,
+        "Discovery & Requirements": 8,
+        "Future-State Process Design": 10,
+        "Solution Design & Configuration": 12,
+        "Integration & Interfaces": 12,
+        "Security & Access": 8,
+        "Content & Document Integration": 8,
+        "Data Migration": 12,
+        "Testing & Acceptance": 10,
+        "Change & Training": 7,
+        "Deployment & Cutover": 5,
+        "Hypercare & Handover": 10,
+    }.get(phase, 7)
+    if any(k in low for k in ["kickoff", "approval", "sign-off", "readiness", "go-live", "handover"]):
+        return 1
+    if any(k in low for k in ["workshop", "assessment", "review", "profiling", "mapping", "planning"]):
+        return max(3, base // 2)
+    return base
+
+
+def _deliverable_for(activity: str) -> str:
+    low = activity.lower()
+    if any(k in low for k in ["requirements", "baseline"]):
+        return "Approved requirements baseline"
+    if any(k in low for k in ["design", "architecture"]):
+        return "Approved design package"
+    if any(k in low for k in ["configuration", "configure"]):
+        return "Configured solution"
+    if any(k in low for k in ["integrat", "api"]):
+        return "Validated integration"
+    if any(k in low for k in ["migration", "migrate", "reconcile"]):
+        return "Migration / reconciliation package"
+    if any(k in low for k in ["test", "uat", "acceptance"]):
+        return "Test / acceptance evidence"
+    if any(k in low for k in ["train", "change"]):
+        return "Training / change package"
+    if any(k in low for k in ["deploy", "cutover", "go-live"]):
+        return "Deployment / cutover completion"
+    if any(k in low for k in ["handover", "hypercare"]):
+        return "Operational handover"
+    return f"Completed: {activity}"
+
+
+def _sow_to_activity_match(item: dict[str, Any], activities: list[dict[str, Any]]) -> list[str]:
+    if not activities:
+        return []
+    stmt = item["statement"].lower()
+    tokens = set(re.findall(r"[a-z]{5,}", stmt))
+    candidates: list[tuple[int, str]] = []
+    for a in activities:
+        at = set(re.findall(r"[a-z]{5,}", a["activity_name"].lower()))
+        score = len(tokens & at)
+        if score:
+            candidates.append((score, a["activity_id"]))
+    if candidates:
+        candidates.sort(reverse=True)
+        return [aid for score, aid in candidates[:2] if score >= 1]
+    # Section/keyword-based fallback mapping so broad in-scope items do not remain falsely unmapped.
+    low = stmt
+    hints = []
+    for keyword, phase in [
+        ("require", "Discovery & Requirements"), ("workflow", "Future-State Process Design"),
+        ("role", "Security & Access"), ("permission", "Security & Access"),
+        ("dashboard", "Solution Design & Configuration"), ("report", "Solution Design & Configuration"),
+        ("notification", "Solution Design & Configuration"), ("configure", "Solution Design & Configuration"),
+        ("integrat", "Integration & Interfaces"), ("erp", "Integration & Interfaces"),
+        ("sso", "Security & Access"), ("identity", "Security & Access"),
+        ("document", "Content & Document Integration"), ("data", "Data Migration"),
+        ("migrat", "Data Migration"), ("test", "Testing & Acceptance"),
+        ("uat", "Testing & Acceptance"), ("train", "Change & Training"),
+        ("cutover", "Deployment & Cutover"), ("deploy", "Deployment & Cutover"),
+        ("hypercare", "Hypercare & Handover"), ("handover", "Hypercare & Handover"),
+        ("governance", "Initiation & Governance"), ("project management", "Initiation & Governance"),
+    ]:
+        if keyword in low:
+            hints.append(phase)
+    for phase in hints:
+        phase_acts = [a for a in activities if a["phase"] == phase]
+        if phase_acts:
+            return [phase_acts[0]["activity_id"]]
+    return []
+
+
+def _build_gaps(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    n = 1
+    for item in items:
+        if item["type"] != "Clarification / Gap":
+            continue
+        low = item["statement"].lower()
+        category = "SOW clarification"
+        severity = "Medium"
+        recommendation = "Clarify and document before the related baseline or approval gate."
+        if "ownership" in low:
+            category, severity, recommendation = "Ownership", "High", "Assign an accountable owner for the activity or control."
+        elif "performance" in low or "numerical target" in low:
+            category, severity, recommendation = "Missing performance target", "Medium", "Define measurable performance thresholds and acceptance criteria."
+        elif "record volume" in low or "does not define exact" in low:
+            category, severity, recommendation = "Missing data volume", "Medium", "Define data volumes and reconciliation thresholds."
+        elif "entry/exit" in low:
+            category, severity, recommendation = "Test readiness criteria", "High", "Define entry/exit criteria and sign-off authority."
+        elif "15%" in low or "variation" in low:
+            category, severity, recommendation = "Scope variation rule", "Medium", "Define how the local-variation threshold will be measured."
+        elif "severity 2" in low:
+            category, severity, recommendation = "Defect acceptance rule", "High", "Define the maximum accepted Severity 2 backlog and approval authority."
+        rows.append({
+            "gap_id": f"GAP-{n:03d}",
+            "category": category,
+            "description": item["statement"],
+            "severity": severity,
+            "recommendation": recommendation,
+            "source_sow_ids": [item["sow_id"]],
+        })
+        n += 1
+    if not rows:
+        rows.append({
+            "gap_id": "GAP-001",
+            "category": "Planning completeness",
+            "description": "Some detailed durations, resource allocations or dependency dates may be implicit in the SOW.",
+            "severity": "Medium",
+            "recommendation": "PM to validate planning assumptions before baseline.",
+            "source_sow_ids": [],
+        })
+    return rows
+
+
+def _build_risks(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    n = 1
+    for item in items:
+        if item["type"] != "Risk / Constraint":
+            continue
+        desc = item["statement"]
+        low = desc.lower()
+        impact = "High" if any(k in low for k in ["data", "security", "delay", "migration", "production", "acceptance"]) else "Medium"
+        rows.append({
+            "risk_id": f"RISK-{n:03d}",
+            "risk": desc,
+            "category": "SOW-identified risk / constraint",
+            "impact": impact,
+            "probability": "Medium",
+            "mitigation": "Assign an owner, define trigger/threshold, and track through RAID governance.",
+            "owner_role": "Project Manager",
+            "source_sow_ids": [item["sow_id"]],
+        })
+        n += 1
+    return rows
+
+
+def _build_assumptions(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    n = 1
+    for item in items:
+        if item["type"] in {"Schedule Assumption", "Commercial Assumption"}:
+            rows.append({
+                "assumption_id": f"ASM-{n:03d}",
+                "category": "Commercial" if item["type"] == "Commercial Assumption" else "Schedule / Delivery",
+                "statement": item["statement"],
+                "explicit": True,
                 "source_sow_ids": [item["sow_id"]],
-                "planning_note": "Structured planning activity derived from SOW workstream; PM review required.",
+                "confidence": "High",
+                "review_status": "PM review required",
+            })
+            n += 1
+    if not rows:
+        rows.append({
+            "assumption_id": "ASM-001",
+            "category": "Planning",
+            "statement": "Where the SOW is silent, duration, owner and dependency values are provisional planning assumptions.",
+            "explicit": False,
+            "source_sow_ids": [],
+            "confidence": "Medium",
+            "review_status": "PM review required",
+        })
+    return rows
+
+
+def _build_constraints(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    n = 1
+    for item in items:
+        if item["type"] == "Dependency":
+            rows.append({
+                "constraint_id": f"CON-{n:03d}",
+                "category": "Dependency",
+                "statement": item["statement"],
+                "source_sow_ids": [item["sow_id"]],
+                "review_status": "PM review required",
+            })
+            n += 1
+        elif item["type"] == "Risk / Constraint" and any(k in item["statement"].lower() for k in ["maximum", "minimum", "limited", "must", "requires", "at least", "no more than"]):
+            rows.append({
+                "constraint_id": f"CON-{n:03d}",
+                "category": "SOW constraint",
+                "statement": item["statement"],
+                "source_sow_ids": [item["sow_id"]],
+                "review_status": "PM review required",
+            })
+            n += 1
+    return rows
+
+
+def _build_wbs_and_activities(sow_items: list[dict[str, Any]], sow_text: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    sections = _sectionize(sow_text)
+    wbs: list[dict[str, Any]] = []
+    activities: list[dict[str, Any]] = []
+    previous_id: str | None = None
+    phase_seen: dict[str, int] = {}
+    for section, text in sections:
+        if not _is_workstream(section):
+            continue
+        name = _workstream_name(section)
+        phase, purpose = _phase_map(name)
+        if phase not in phase_seen:
+            phase_seen[phase] = len(wbs) + 1
+            wbs.append({"wbs_id": str(len(wbs) + 1), "phase": phase, "purpose": purpose, "source_sections": [section]})
+        phase_no = phase_seen[phase]
+        source = [x for x in sow_items if x["section"] == section and x["executable"]]
+        phrases = _workstream_activity_phrases(section, text, phase)
+        if not phrases:
+            phrases = [f"Deliver {phase.lower()} scope"]
+        for idx, name2 in enumerate(phrases, 1):
+            aid = _id("ACT", f"{section}:{name2}", len(activities) + 1)
+            # Section source is the primary traceability anchor; add up to two strong related items.
+            src_ids = [x["sow_id"] for x in source]
+            if not src_ids:
+                src_ids = [_id("SOW", f"{section}:{text}", 1)]
+            activity = {
+                "wbs_id": f"{phase_no}.{idx}",
+                "activity_id": aid,
+                "activity_name": name2[:160],
+                "phase": phase,
+                "duration_days": _duration(name2, phase),
+                "dependency_ids": [previous_id] if previous_id else [],
+                "owner_role": _owner_for(phase, name2),
+                "deliverable": _deliverable_for(name2),
+                "milestone": False,
+                "source_sow_ids": src_ids[:6],
+                "planning_note": "Activity derived from executable SOW scope; duration, owner and dependency are planning recommendations for PM review.",
             }
             activities.append(activity)
-            trace_map[item["sow_id"]].append(aid)
-            previous_by_phase[phase] = aid
+            previous_id = aid
+    return wbs, activities
 
-    # Assign WBS numbers by phase appearance.
-    phase_numbers: dict[str, str] = {}
-    phase_counters: dict[str, int] = {}
-    for activity in activities:
-        phase = activity["phase"]
-        if phase not in phase_numbers:
-            phase_numbers[phase] = str(len(phase_numbers) + 1)
-            phase_counters[phase] = 0
-        phase_counters[phase] += 1
-        activity["wbs_id"] = f"{phase_numbers[phase]}.{phase_counters[phase]}"
 
-    # Non-workstream scope statements are traceable but are not falsely converted into tasks.
-    traceability: list[dict[str, Any]] = []
+def _build_milestones(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    n = 1
     for item in items:
-        mapped = trace_map.get(item["sow_id"], [])
-        if mapped:
-            traceability.append(
-                {
-                    "sow_id": item["sow_id"],
-                    "activity_ids": mapped,
-                    "status": "Mapped",
-                    "reason": "Mapped to structured planning activities for the relevant workstream.",
-                }
-            )
-        elif item.get("type") in {"Out of Scope", "Assumption", "Dependency", "Responsibility", "Risk / Constraint", "Acceptance", "Milestone"}:
-            traceability.append(
-                {
-                    "sow_id": item["sow_id"],
-                    "activity_ids": [],
-                    "status": "Reference",
-                    "reason": "SOW item informs planning but is not itself a project activity.",
-                }
-            )
-        else:
-            traceability.append(
-                {
-                    "sow_id": item["sow_id"],
-                    "activity_ids": [],
-                    "status": "Needs Mapping",
-                    "reason": "PM review required to determine whether this SOW statement needs a dedicated activity.",
-                }
-            )
-    return activities, traceability
+        if item["type"] != "Milestone":
+            continue
+        # A milestone section is semicolon-delimited; each SOW item should therefore already be one milestone.
+        name, target = _parse_milestone(item["statement"])
+        rows.append({
+            "milestone_id": f"MS-{n:03d}",
+            "name": name,
+            "target": target,
+            "source_sow_ids": [item["sow_id"]],
+            "status": "Planned",
+            "planning_note": "Explicit SOW milestone; target retained from source where stated.",
+        })
+        n += 1
+    if not rows:
+        for name in ["Project kickoff", "Requirements baseline", "Business acceptance", "Production handover"]:
+            rows.append({
+                "milestone_id": f"MS-{n:03d}",
+                "name": name,
+                "target": "TBD",
+                "source_sow_ids": [],
+                "status": "Planning proposal",
+                "planning_note": "Planning proposal because the SOW did not provide an explicit milestone.",
+            })
+            n += 1
+    return rows
+
+
+def _parse_milestone(text: str) -> tuple[str, str]:
+    p = _clean(text)
+    m = re.match(r"(.+?)\s+(Week\s*\d+|Day\s*\d+|Q[1-4]|\d{4}-\d{2}-\d{2})$", p, re.I)
+    return (_clean(m.group(1)), _clean(m.group(2))) if m else (p, "TBD")
+
+
+def _infer_project_type(text: str) -> str:
+    low = text.lower()
+    checks = [
+        (["construction", "civil works", "site work"], "Construction / Infrastructure"),
+        (["platform implementation", "software implementation", "erp", "crm", "sso", "api", "configuration"], "Enterprise Technology Implementation"),
+        (["data migration", "data warehouse", "etl"], "Data / Migration"),
+        (["change management", "operating model", "process redesign"], "Business Transformation"),
+        (["manufacturing line", "plant", "production line"], "Manufacturing / Operations"),
+        (["marketing campaign", "brand launch"], "Marketing / Commercial"),
+    ]
+    for keys, label in checks:
+        if any(k in low for k in keys):
+            return label
+    return "General Project / To be confirmed"
 
 
 def build_fallback_plan(sow_text: str, project_name: str) -> dict[str, Any]:
-    """Deterministic, domain-agnostic planner used as the full-plan construction layer."""
-    items = parse_sow_items(sow_text)
-    activities, traceability = _make_activities(items)
-    in_scope, out_scope = _extract_scope(items)
-    milestones = _extract_explicit_milestones(items)
-    gaps = _extract_gaps(items)
-    risks = _extract_risks(items)
+    items = _parse_sow_items(sow_text)
+    wbs, activities = _build_wbs_and_activities(items, sow_text)
 
-    duration_match = re.search(r"(?:duration|completed|implementation).*?(\d+)\s+weeks", sow_text, flags=re.I)
-    target_duration = f"{duration_match.group(1)} weeks" if duration_match else "Not stated"
+    # Map executable SOW items to actual activities.
+    traceability: list[dict[str, Any]] = []
+    for item in items:
+        mapped = _sow_to_activity_match(item, activities) if item["executable"] else []
+        if item["executable"]:
+            status = "Mapped" if mapped else "Unmapped"
+            reason = "Executable SOW scope mapped to planning activities." if mapped else "Executable SOW scope requires PM mapping review."
+        elif item["type"] == "Clarification / Gap":
+            status = "Gap"
+            reason = "Clarification is handled in the Gaps tab, not as an activity."
+        else:
+            status = "Reference"
+            reason = f"{item['type']} is retained as control/reference content rather than an executable activity."
+        traceability.append({
+            "sow_id": item["sow_id"],
+            "section": item["section"],
+            "statement": item["statement"],
+            "item_type": item["type"],
+            "activity_ids": mapped,
+            "status": status,
+            "reason": reason,
+        })
+
+    executable = [x for x in items if x["executable"]]
+    mapped_n = sum(1 for x in traceability if x["status"] == "Mapped")
+    coverage = round(mapped_n / len(executable) * 100, 1) if executable else 100.0
 
     return {
         "summary": {
             "project_name": project_name,
-            "project_type": "Project type to be confirmed",
-            "description": f"Structured project plan derived from the SOW. Target duration in the SOW: {target_duration}.",
+            "project_type": _infer_project_type(sow_text),
+            "description": _build_summary(sow_text),
             "confidence": "Medium",
         },
-        "scope": {"in_scope": in_scope, "out_of_scope": out_scope},
+        "scope": {
+            "in_scope": [x["statement"] for x in items if x["category"] == "Executable"],
+            "out_of_scope": [x["statement"] for x in items if x["type"] == "Out of Scope"],
+        },
         "sow_items": items,
-        "wbs": [],
+        "wbs": wbs,
         "activities": activities,
-        "milestones": milestones,
-        "assumptions": [
-            "Durations and owners are provisional where the SOW is silent.",
-            "Dependencies are planning proposals and require PM validation.",
-        ],
-        "constraints": [
-            item["statement"] for item in items if item.get("type") == "Risk / Constraint"
-        ],
-        "gaps": gaps or [
-            {
-                "gap_id": "GAP-001",
-                "category": "Planning completeness",
-                "description": "Confirm durations, owners, entry/exit criteria and acceptance criteria before baselining.",
-                "severity": "Review",
-                "recommendation": "PM to validate the generated plan before baselining.",
-            }
-        ],
-        "risks": risks,
+        "milestones": _build_milestones(items),
+        "assumptions": _build_assumptions(items),
+        "constraints": _build_constraints(items),
+        "gaps": _build_gaps(items),
+        "risks": _build_risks(items),
         "traceability": traceability,
-        "metadata": {"engine": "structured_planner", "source_characters": len(sow_text)},
+        "metadata": {
+            "engine": "domain_agnostic_planner_v3",
+            "schema_version": "3.0",
+            "source_characters": len(sow_text),
+            "sow_item_count": len(items),
+            "executable_sow_items": len(executable),
+            "activity_count": len(activities),
+            "milestone_count": len(_build_milestones(items)),
+            "gap_count": len(_build_gaps(items)),
+            "risk_count": len(_build_risks(items)),
+            "assumption_count": len(_build_assumptions(items)),
+            "constraint_count": len(_build_constraints(items)),
+            "traceability_coverage": coverage,
+            "ai_seed_used": False,
+        },
     }
 
 
+def _build_summary(text: str) -> str:
+    for section, value in _sectionize(text):
+        if "purpose" in section.lower() and value:
+            return value[:500]
+    return "Project plan derived from the SOW. PM review is required before baselining."
+
+
 def validate_and_normalize_plan(plan: dict[str, Any]) -> dict[str, Any]:
-    project_name = "Project"
-    if isinstance(plan, dict):
-        project_name = plan.get("summary", {}).get("project_name", "Project") if isinstance(plan.get("summary"), dict) else "Project"
-    default = build_fallback_plan("", project_name)
-    result = copy.deepcopy(default)
     if not isinstance(plan, dict):
-        return result
-    for key in result:
-        value = plan.get(key)
-        if value is not None and isinstance(value, type(result[key])):
-            result[key] = value
-    for activity in result.get("activities", []):
-        activity.setdefault("dependency_ids", [])
-        activity.setdefault("source_sow_ids", [])
-        activity.setdefault("milestone", False)
+        return build_fallback_plan("", "Project")
+    result = copy.deepcopy(plan)
+    for key, default in {
+        "summary": {},
+        "scope": {"in_scope": [], "out_of_scope": []},
+        "sow_items": [], "wbs": [], "activities": [], "milestones": [],
+        "assumptions": [], "constraints": [], "gaps": [], "risks": [], "traceability": [], "metadata": {},
+    }.items():
+        result.setdefault(key, default)
+    for a in result["activities"]:
+        a.setdefault("dependency_ids", [])
+        a.setdefault("source_sow_ids", [])
+        a.setdefault("milestone", False)
+        a.setdefault("owner_role", "Workstream Lead")
+        a.setdefault("planning_note", "PM review required.")
+    for t in result["traceability"]:
+        t.setdefault("activity_ids", [])
+        t.setdefault("status", "Reference")
+        t.setdefault("reason", "")
+    result["metadata"]["schema_version"] = "3.0"
     return result
 
 
 def merge_ai_seed_into_plan(base_plan: dict[str, Any], seed: dict[str, Any]) -> dict[str, Any]:
-    """Apply compact AI guidance to the full deterministic plan without duplicating SOW prose as activities."""
-    result = copy.deepcopy(base_plan)
-    summary = result.setdefault("summary", {})
-    if seed.get("project_type"):
-        summary["project_type"] = str(seed["project_type"]).strip()
-    if seed.get("description"):
-        summary["description"] = str(seed["description"]).strip()
-    if seed.get("confidence"):
-        summary["confidence"] = str(seed["confidence"]).strip()
+    """Merge compact AI intelligence without replacing the structured SOW-derived model."""
+    result = validate_and_normalize_plan(base_plan)
+    seed = seed if isinstance(seed, dict) else {}
+    summary = result["summary"]
+    for src, dest in [("project_type", "project_type"), ("description", "description"), ("confidence", "confidence")]:
+        if seed.get(src):
+            summary[dest] = _clean(seed[src])
 
-    # AI suggestions are supplemental; the structured planner owns the complete WBS.
-    phase_rows = seed.get("phases") if isinstance(seed.get("phases"), list) else []
-    result.setdefault("metadata", {})["ai_suggested_phases"] = [
-        str(x.get("phase", "")).strip() for x in phase_rows if isinstance(x, dict) and str(x.get("phase", "")).strip()
-    ][:5]
+    # Surface AI phase labels as recommendations, without creating duplicate WBS rows.
+    ai_phases = seed.get("phases") if isinstance(seed.get("phases"), list) else []
+    ai_phase_names = []
+    for p in ai_phases[:8]:
+        name = _clean(p.get("phase") if isinstance(p, dict) else p)
+        if name:
+            ai_phase_names.append(name)
+    for i, row in enumerate(result.get("wbs", [])):
+        if i < len(ai_phase_names):
+            row["ai_recommended_label"] = ai_phase_names[i]
 
-    # Map AI activities to actual SOW section IDs. Do not create duplicate "one sentence = one task" rows.
-    sow_items = result.get("sow_items", [])
-    for row in (seed.get("key_activities") or [])[:4]:
-        if not isinstance(row, dict) or not str(row.get("name", "")).strip():
+    # AI key activities are attached to the closest existing activity rather than appended as duplicates.
+    for ai_row in seed.get("key_activities", []) if isinstance(seed.get("key_activities"), list) else []:
+        if not isinstance(ai_row, dict):
             continue
-        refs = row.get("source_indexes") if isinstance(row.get("source_indexes"), list) else []
-        source_ids = []
-        for ref in refs:
-            try:
-                idx = int(ref)
-            except Exception:
-                continue
-            if 1 <= idx <= len(sow_items):
-                source_ids.append(sow_items[idx - 1].get("sow_id"))
-        source_ids = [x for x in source_ids if x]
-
-        # Prefer an existing activity with a similar name; otherwise add one supplemental AI activity.
-        name = str(row["name"]).strip()
+        name = _clean(ai_row.get("name"))
+        if not name:
+            continue
+        at = set(re.findall(r"[a-z]{4,}", name.lower()))
         best = None
-        best_score = 0.0
-        for activity in result.get("activities", []):
-            score = SequenceMatcher(None, _norm(name), _norm(activity.get("activity_name", ""))).ratio()
+        best_score = 0
+        for a in result["activities"]:
+            bt = set(re.findall(r"[a-z]{4,}", a.get("activity_name", "").lower()))
+            score = len(at & bt)
             if score > best_score:
+                best = a
                 best_score = score
-                best = activity
-        if best is not None and best_score >= 0.58:
-            best["planning_note"] = "AI-guided planning activity; PM review required."
-            if source_ids:
-                best["source_sow_ids"] = list(dict.fromkeys(best.get("source_sow_ids", []) + source_ids))
-            continue
+        if best is not None and best_score >= 1:
+            best["ai_flag"] = "AI-identified key activity"
+            best["ai_note"] = "Qwen identified this as a key planning activity; PM review required."
 
-        aid = f"AI-ACT-{len([a for a in result.get('activities', []) if str(a.get('activity_id','')).startswith('AI-ACT-')])+1:03d}"
-        phase = str(row.get("phase", "General Delivery")).strip() or "General Delivery"
-        activity = {
-            "wbs_id": "AI.1",
-            "activity_id": aid,
-            "activity_name": name[:120],
-            "phase": phase,
-            "duration_days": max(1, int(row.get("duration_days", 5) or 5)),
-            "dependency_ids": [],
-            "owner_role": str(row.get("owner_role", "Project Team")).strip() or "Project Team",
-            "deliverable": name[:140],
-            "milestone": False,
-            "source_sow_ids": source_ids,
-            "planning_note": "AI-guided planning activity; PM review required.",
-        }
-        result["activities"].insert(0, activity)
+    # Merge AI gaps/risks/assumptions as additive insights.
+    for category, key, id_prefix, defaults in [
+        ("gaps", "description", "AI-GAP", {"category": "AI planning review", "severity": "Review", "recommendation": "PM to validate before baselining.", "source_sow_ids": []}),
+        ("risks", "risk", "AI-RISK", {"category": "AI planning review", "impact": "Review", "probability": "Review", "mitigation": "PM to assess and assign an owner.", "owner_role": "Project Manager", "source_sow_ids": []}),
+    ]:
+        rows = result.setdefault(category, [])
+        existing = {str(x.get(key, "")).strip().lower() for x in rows if isinstance(x, dict)}
+        for text in seed.get(category, []) if isinstance(seed.get(category), list) else []:
+            desc = _clean(text)
+            if desc and desc.lower() not in existing:
+                row = dict(defaults)
+                row[key] = desc
+                rows.append(row)
+                existing.add(desc.lower())
+        id_key = "gap_id" if category == "gaps" else "risk_id"
+        for i, row in enumerate(rows, 1):
+            row.setdefault(id_key, f"{id_prefix}-{i:03d}")
 
-    # AI milestones supplement explicit SOW milestones only when the SOW did not provide that milestone.
-    if seed.get("milestones"):
-        existing = {_norm(m.get("name", "")) for m in result.get("milestones", [])}
-        for item in seed["milestones"][:3]:
-            name = str(item.get("name", "")).strip() if isinstance(item, dict) else str(item).strip()
-            if name and _norm(name) not in existing:
-                result["milestones"].append(
-                    {
-                        "milestone_id": f"AI-MS-{len(result.get('milestones', []))+1:03d}",
-                        "name": name[:120],
-                        "target": str(item.get("target", "TBD")).strip() if isinstance(item, dict) else "TBD",
-                        "source": "AI planning recommendation; PM review required.",
-                    }
-                )
+    assumptions = result.setdefault("assumptions", [])
+    existing = {str(a.get("statement", a)).strip().lower() if isinstance(a, dict) else str(a).strip().lower() for a in assumptions}
+    for text in seed.get("assumptions", []) if isinstance(seed.get("assumptions"), list) else []:
+        desc = _clean(text)
+        if desc and desc.lower() not in existing:
+            assumptions.append({
+                "assumption_id": f"AI-ASM-{len(assumptions)+1:03d}",
+                "category": "AI planning review",
+                "statement": desc,
+                "explicit": False,
+                "source_sow_ids": [],
+                "confidence": "Medium",
+                "review_status": "PM review required",
+            })
 
-    for label, key, prefix in [("gap", "gaps", "GAP"), ("risk", "risks", "RISK")]:
-        for item in (seed.get(key) or [])[:4]:
-            text = str(item).strip()
-            if not text:
-                continue
-            collection = result.setdefault(key, [])
-            existing = {_norm(x.get("description", x.get("risk", ""))) for x in collection}
-            if _norm(text) in existing:
-                continue
-            if label == "gap":
-                collection.append({
-                    "gap_id": f"AI-{prefix}-{len(collection)+1:03d}",
-                    "category": "AI review",
-                    "description": text[:240],
-                    "severity": "Review",
-                    "recommendation": "PM to clarify before baselining.",
-                })
-            else:
-                collection.append({
-                    "risk_id": f"AI-{prefix}-{len(collection)+1:03d}",
-                    "risk": text[:240],
-                    "impact": "Medium",
-                    "probability": "Medium",
-                    "mitigation": "PM to assess and assign an owner.",
-                })
-
-    # Build a cleaner WBS directly from actual activity phases.
-    phases: list[str] = []
-    for activity in result.get("activities", []):
-        phase = str(activity.get("phase", "General Delivery"))
-        if phase not in phases:
-            phases.append(phase)
-    result["wbs"] = [{"wbs_id": str(i), "phase": phase, "parent_wbs_id": ""} for i, phase in enumerate(phases, 1)]
-    phase_to_num = {phase: str(i) for i, phase in enumerate(phases, 1)}
-    counters: dict[str, int] = {}
-    for activity in result.get("activities", []):
-        phase = str(activity.get("phase", "General Delivery"))
-        counters[phase] = counters.get(phase, 0) + 1
-        activity["wbs_id"] = f"{phase_to_num.get(phase, '1')}.{counters[phase]}"
-
-    result.setdefault("metadata", {})["ai_seed_used"] = True
-    result["metadata"]["engine"] = "groq_qwen38_guided_structured_planner"
+    executable = [x for x in result.get("sow_items", []) if x.get("executable")]
+    mapped_n = sum(1 for x in result.get("traceability", []) if x.get("status") == "Mapped")
+    result["metadata"]["traceability_coverage"] = round(mapped_n / len(executable) * 100, 1) if executable else 100.0
+    result["metadata"]["ai_seed_used"] = True
+    result["metadata"]["schema_version"] = "3.0"
     return result

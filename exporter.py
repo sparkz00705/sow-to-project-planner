@@ -11,6 +11,8 @@ from openpyxl.utils import get_column_letter
 def _frame(items):
     if not items:
         return pd.DataFrame([{"Info": "No records"}])
+    if items and not isinstance(items[0], dict):
+        return pd.DataFrame({"Value": items})
     return pd.DataFrame(items)
 
 
@@ -18,12 +20,17 @@ def build_excel_workbook(plan: dict) -> bytes:
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         summary = plan.get("summary", {})
+        metadata = plan.get("metadata", {})
         pd.DataFrame(
             [
                 ["Project Name", summary.get("project_name", "")],
                 ["Project Type", summary.get("project_type", "")],
                 ["Description", summary.get("description", "")],
-                ["Confidence", summary.get("confidence", "")],
+                ["Planning Confidence", summary.get("confidence", "")],
+                ["Planning Engine", metadata.get("engine", "")],
+                ["Schema Version", metadata.get("schema_version", "")],
+                ["Executable SOW Items", metadata.get("executable_sow_items", "")],
+                ["Traceability Coverage", metadata.get("traceability_coverage", "")],
             ],
             columns=["Field", "Value"],
         ).to_excel(writer, sheet_name="Project Summary", index=False)
@@ -34,13 +41,8 @@ def build_excel_workbook(plan: dict) -> bytes:
         _frame(plan.get("traceability", [])).to_excel(writer, sheet_name="Traceability", index=False)
         _frame(plan.get("gaps", [])).to_excel(writer, sheet_name="Gaps", index=False)
         _frame(plan.get("risks", [])).to_excel(writer, sheet_name="Risks", index=False)
-        pd.DataFrame({"Assumptions": plan.get("assumptions", []) or [""]}).to_excel(
-            writer, sheet_name="Assumptions", index=False
-        )
-        pd.DataFrame({"Constraints": plan.get("constraints", []) or [""]}).to_excel(
-            writer, sheet_name="Constraints", index=False
-        )
-
+        _frame(plan.get("assumptions", [])).to_excel(writer, sheet_name="Assumptions", index=False)
+        _frame(plan.get("constraints", [])).to_excel(writer, sheet_name="Constraints", index=False)
     output.seek(0)
     wb = load_workbook(output)
     for ws in wb.worksheets:

@@ -6,11 +6,11 @@ from datetime import datetime, timezone
 import pandas as pd
 import streamlit as st
 
-from src.ai import generate_plan_with_openrouter, get_openrouter_config
-from src.db import create_project, init_db, list_projects, load_project
-from src.exporter import build_excel_workbook
-from src.extract import extract_document
-from src.planner import build_fallback_plan, validate_and_normalize_plan
+from ai import generate_plan_with_openrouter, get_openrouter_config
+from db import create_project, init_db, list_projects, load_project
+from exporter import build_excel_workbook
+from extract import extract_document
+from planner import build_fallback_plan, validate_and_normalize_plan
 
 st.set_page_config(
     page_title="SOW → Project Planner",

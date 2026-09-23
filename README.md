@@ -64,3 +64,10 @@ The workflow runs every 10 minutes and opens the application with Selenium. If S
 The AI proposes. The Project Manager reviews and decides.
 
 The SOW is the source of truth. Inferred planning content is explicitly treated as a proposal or assumption rather than a contractual commitment.
+
+
+## Flat GitHub deployment package
+
+All application Python modules are intentionally kept in the repository root so the files can be uploaded directly through the GitHub web interface without nested application folders.
+
+The optional GitHub Actions workflow is not embedded in this flat package; `wake_streamlit.py` is included as the Selenium wake-up script. A GitHub Actions workflow can be added separately later.

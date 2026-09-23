@@ -8,13 +8,15 @@ import requests
 
 from planner import build_fallback_plan, merge_ai_seed_into_plan
 
+AI_ENGINE_VERSION = "groq-qwen38-seed-v3"
+
 
 @dataclass(frozen=True)
 class GroqConfig:
     api_key: str
     model: str = "qwen/qwen3.8-27b"
     base_url: str = "https://api.groq.com/openai/v1"
-    timeout_seconds: int = 180
+    timeout_seconds: int = 120
 
 
 def get_groq_config(api_key: str, model: str, base_url: str) -> GroqConfig:
@@ -22,114 +24,12 @@ def get_groq_config(api_key: str, model: str, base_url: str) -> GroqConfig:
         api_key=api_key,
         model=model or "qwen/qwen3.8-27b",
         base_url=(base_url or "https://api.groq.com/openai/v1").rstrip("/"),
-        timeout_seconds=180,
+        timeout_seconds=120,
     )
 
 
-# Deliberately small schema. Groq's current organization limit reported by the
-# user's account is 1,000 output tokens/minute. Asking Qwen to produce the full
-# plan in one response causes schema truncation. The AI therefore returns only
-# a compact planning seed; deterministic local code expands it into the full plan.
-AI_SEED_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "project_type": {"type": "string"},
-        "description": {"type": "string"},
-        "confidence": {"type": "string"},
-        "phases": {
-            "type": "array",
-            "maxItems": 5,
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "phase": {"type": "string"},
-                    "purpose": {"type": "string"},
-                },
-                "required": ["phase", "purpose"],
-            },
-        },
-        "key_activities": {
-            "type": "array",
-            "maxItems": 6,
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "name": {"type": "string"},
-                    "phase": {"type": "string"},
-                    "duration_days": {"type": "integer"},
-                    "owner_role": {"type": "string"},
-                    "source_indexes": {
-                        "type": "array",
-                        "maxItems": 3,
-                        "items": {"type": "integer"},
-                    },
-                },
-                "required": ["name", "phase", "duration_days", "owner_role", "source_indexes"],
-            },
-        },
-        "milestones": {
-            "type": "array",
-            "maxItems": 5,
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "name": {"type": "string"},
-                    "target": {"type": "string"},
-                },
-                "required": ["name", "target"],
-            },
-        },
-        "gaps": {
-            "type": "array",
-            "maxItems": 4,
-            "items": {"type": "string"},
-        },
-        "risks": {
-            "type": "array",
-            "maxItems": 4,
-            "items": {"type": "string"},
-        },
-        "assumptions": {
-            "type": "array",
-            "maxItems": 4,
-            "items": {"type": "string"},
-        },
-    },
-    "required": [
-        "project_type",
-        "description",
-        "confidence",
-        "phases",
-        "key_activities",
-        "milestones",
-        "gaps",
-        "risks",
-        "assumptions",
-    ],
-}
-
-
-SYSTEM_PROMPT = """
-You are a senior project/program management planning architect.
-Analyze the supplied Statement of Work and produce a compact planning seed.
-
-Important rules:
-1. Use only facts supported by the SOW; clearly separate planning proposals.
-2. Project type should be specific when evidence exists; otherwise use a cautious label.
-3. Identify the most useful phases and 6 or fewer high-value activities.
-4. Keep every field short. Do not write paragraphs inside arrays.
-5. For each AI activity, source_indexes refer to the numbered SOW statements supplied in the prompt.
-6. Do not invent contractual commitments, dates, budgets, resources, acceptance criteria, or scope.
-7. Surface ambiguity as a gap instead of silently resolving it.
-""".strip()
-
-
 def _parse_content(content: str) -> dict[str, Any]:
-    text = content.strip()
+    text = (content or "").strip()
     if text.startswith("```"):
         lines = text.splitlines()
         if lines and lines[0].startswith("```"):
@@ -140,18 +40,42 @@ def _parse_content(content: str) -> dict[str, Any]:
     return json.loads(text)
 
 
-def _number_sow_statements(sow_text: str, limit: int = 24) -> list[str]:
+def _number_sow_statements(sow_text: str, limit: int = 18) -> list[str]:
     import re
 
-    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", sow_text) if s.strip()]
-    result = []
-    for sentence in sentences:
-        if len(sentence) < 20:
-            continue
-        result.append(sentence)
-        if len(result) >= limit:
-            break
-    return result
+    sentences = [
+        s.strip()
+        for s in re.split(r"(?<=[.!?])\s+|\n+", sow_text)
+        if s.strip() and len(s.strip()) >= 20
+    ]
+    return sentences[:limit]
+
+
+# Intentionally tiny JSON object. Groq's documented API exposes max_completion_tokens,
+# but this user's organization has reported a 1,000-output-token/minute limit. Keeping
+# the requested completion at 600 and avoiding a large strict JSON schema prevents the
+# planner call from being rejected for expected output size.
+SEED_SYSTEM_PROMPT = """
+You are a senior project/program manager. Analyze the supplied SOW and return a VERY COMPACT
+JSON planning seed for a deterministic planning engine.
+
+Return ONLY JSON with these keys:
+project_type: short string
+summary: short string
+phases: array of up to 4 short strings
+activities: array of up to 4 objects with name, phase, source_index
+milestones: array of up to 3 short strings
+gaps: array of up to 3 short strings
+risks: array of up to 3 short strings
+
+Rules:
+- Use only information supported by the SOW.
+- source_index refers to the numbered SOW statements in the prompt.
+- Keep strings very short.
+- Do not generate a full WBS, traceability matrix, or long explanations.
+- Do not invent dates, budgets, resources, or contractual commitments.
+- Surface ambiguity as a gap.
+""".strip()
 
 
 def generate_plan_with_groq(sow_text: str, project_name: str, config: GroqConfig) -> dict[str, Any]:
@@ -167,29 +91,21 @@ Project name: {project_name}
 NUMBERED SOW STATEMENTS:
 {numbered_text}
 
-Return ONLY the compact JSON object required by the schema.
-Prioritize the project type, 4-5 phases, up to 6 key activities, key milestones, and the most material gaps/risks.
-Use very short phrases. The response must stay compact.
+Return the compact JSON seed now. Keep the entire answer brief enough for a 600-token maximum response.
 """.strip()
 
     payload = {
         "model": config.model,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": SEED_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ],
         "temperature": 0.2,
         "reasoning_effort": "none",
         "reasoning_format": "hidden",
-        "max_completion_tokens": 650,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "sow_planning_seed",
-                "strict": True,
-                "schema": AI_SEED_SCHEMA,
-            },
-        },
+        # Use the current parameter name documented by Groq.
+        "max_completion_tokens": 600,
+        "response_format": {"type": "json_object"},
     }
 
     headers = {
@@ -198,8 +114,12 @@ Use very short phrases. The response must stay compact.
         "X-Title": "SOW Project Planner",
     }
 
-    url = f"{config.base_url}/chat/completions"
-    response = requests.post(url, headers=headers, json=payload, timeout=config.timeout_seconds)
+    response = requests.post(
+        f"{config.base_url}/chat/completions",
+        headers=headers,
+        json=payload,
+        timeout=config.timeout_seconds,
+    )
     if not response.ok:
         raise RuntimeError(f"Groq HTTP {response.status_code}: {response.text[:2000]}")
 
@@ -208,20 +128,60 @@ Use very short phrases. The response must stay compact.
     if not choices:
         raise RuntimeError(f"Groq returned no choices: {json.dumps(body)[:2000]}")
 
-    message = choices[0].get("message", {})
-    content = message.get("content")
+    content = (choices[0].get("message") or {}).get("content")
     if not content:
         raise RuntimeError("Groq returned an empty model response.")
 
     seed = _parse_content(content)
+    if not isinstance(seed, dict):
+        raise RuntimeError("Groq returned JSON, but it was not an object.")
+
+    # Normalize the smaller seed into the existing merge contract.
+    normalized = {
+        "project_type": seed.get("project_type", "").strip() if isinstance(seed.get("project_type"), str) else "",
+        "description": seed.get("summary", "").strip() if isinstance(seed.get("summary"), str) else "",
+        "confidence": "High" if seed.get("project_type") else "Medium",
+        "phases": [
+            {"phase": str(x).strip(), "purpose": "AI-suggested phase; PM review required."}
+            for x in (seed.get("phases") or []) if str(x).strip()
+        ][:4],
+        "key_activities": [],
+        "milestones": [],
+        "gaps": [str(x).strip() for x in (seed.get("gaps") or []) if str(x).strip()][:3],
+        "risks": [str(x).strip() for x in (seed.get("risks") or []) if str(x).strip()][:3],
+        "assumptions": [],
+    }
+
+    for row in (seed.get("activities") or [])[:4]:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name", "")).strip()
+        if not name:
+            continue
+        normalized["key_activities"].append(
+            {
+                "name": name,
+                "phase": str(row.get("phase", "")).strip() or "Execution",
+                "duration_days": 5,
+                "owner_role": "Project Team",
+                "source_indexes": [int(row["source_index"]) ] if str(row.get("source_index", "")).isdigit() else [],
+            }
+        )
+
+    for item in (seed.get("milestones") or [])[:3]:
+        if isinstance(item, str) and item.strip():
+            normalized["milestones"].append({"name": item.strip(), "target": "TBD"})
+
     base_plan = build_fallback_plan(sow_text, project_name)
-    plan = merge_ai_seed_into_plan(base_plan, seed)
+    plan = merge_ai_seed_into_plan(base_plan, normalized)
     plan.setdefault("metadata", {})
     plan["metadata"].update(
         {
-            "engine": "groq_ai_seed_plus_local_planner",
+            "engine": "groq_qwen38_compact_seed",
+            "engine_version": AI_ENGINE_VERSION,
             "source_characters": len(sow_text),
             "model": config.model,
+            "ai_output_cap": 600,
         }
     )
     return plan

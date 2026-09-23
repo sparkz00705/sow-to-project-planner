@@ -7,7 +7,7 @@ import pandas as pd
 import streamlit as st
 
 from ai import generate_plan_with_openrouter, get_openrouter_config
-from db import create_project, init_db, list_projects, load_project
+from db import create_project, init_db, list_projects, load_project, record_visit
 from exporter import build_excel_workbook
 from extract import extract_document
 from planner import build_fallback_plan, validate_and_normalize_plan
@@ -146,8 +146,29 @@ def show_plan(plan: dict) -> None:
     )
 
 
+def show_footer(visit_count: int) -> None:
+    st.markdown("---")
+    st.markdown("**Projects**")
+    st.markdown(
+        '[SOW → Project Planner](#) | '
+        '[GxP AI Readiness & Governance Assessment](https://gxp-ai-readiness-governance.streamlit.app/) | '
+        '[AI Risk & Issue Dashboard](https://ai-risk-issue-dashboard.streamlit.app/)'
+    )
+    st.markdown("© 2026 Sriram Sampath. All rights reserved.")
+    st.markdown('[LinkedIn](https://www.linkedin.com/in/sriramsampath81/)')
+    st.caption(f"👁️ Visits: {visit_count}")
+
+
+
 def main() -> None:
     db = database()
+
+    if "visit_recorded" not in st.session_state:
+        try:
+            st.session_state["visit_count"] = record_visit(db)
+        except Exception:
+            st.session_state["visit_count"] = 0
+        st.session_state["visit_recorded"] = True
 
     st.title("📋 SOW → Project Planner")
     st.caption(
@@ -159,31 +180,17 @@ def main() -> None:
         st.success("App is awake.")
         st.stop()
 
-    with st.sidebar:
-        st.header("Configuration")
-        or_cfg = get_openrouter_config(
-            api_key=get_secret("OPENROUTER_API_KEY", ""),
-            model=get_secret("OPENROUTER_MODEL", "qwen/qwen3.6-27b"),
-            base_url=get_secret("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
-            site_url=get_secret("OPENROUTER_SITE_URL", ""),
-            app_name=get_secret("OPENROUTER_APP_NAME", "SOW Project Planner"),
-        )
-        use_ai = st.toggle("Use Qwen via OpenRouter", value=bool(or_cfg.api_key))
-        st.write(f"Model: `{or_cfg.model}`")
-        if use_ai and not or_cfg.api_key:
-            st.warning("OPENROUTER_API_KEY is not configured in Streamlit Secrets.")
-        st.divider()
-        st.markdown("**Database**")
-        if get_secret("DATABASE_URL", ""):
-            st.success("PostgreSQL mode")
-        else:
-            st.info("SQLite fallback mode — cloud persistence is not guaranteed.")
-        st.divider()
-        st.markdown("**What this app generates**")
-        st.markdown(
-            "SOW items · WBS · activities · dependencies · milestones · assumptions · "
-            "gaps · risks · traceability · Excel"
-        )
+    # Internal configuration is intentionally hidden from end users.
+    # The app uses OpenRouter/Qwen automatically when the secret is configured;
+    # otherwise it falls back to the built-in planner.
+    or_cfg = get_openrouter_config(
+        api_key=get_secret("OPENROUTER_API_KEY", ""),
+        model=get_secret("OPENROUTER_MODEL", "qwen/qwen3.6-27b"),
+        base_url=get_secret("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+        site_url=get_secret("OPENROUTER_SITE_URL", ""),
+        app_name=get_secret("OPENROUTER_APP_NAME", "SOW Project Planner"),
+    )
+    use_ai = bool(or_cfg.api_key)
 
     projects = list_projects(db)
     with st.sidebar:
@@ -246,17 +253,17 @@ def main() -> None:
 
         with st.spinner("Analyzing the SOW and building the project plan..."):
             source = uploaded.name if uploaded else "Pasted SOW"
-            if use_ai and or_cfg.api_key:
+            if use_ai:
                 try:
                     plan = generate_plan_with_openrouter(extracted_text, project_name, or_cfg)
-                    engine = "Qwen via OpenRouter"
-                except Exception as exc:
-                    st.warning(f"AI generation failed, so the local fallback planner was used. Details: {exc}")
+                    engine = "AI planner"
+                except Exception:
+                    st.warning("AI planning was unavailable, so the built-in planner was used instead.")
                     plan = build_fallback_plan(extracted_text, project_name)
-                    engine = "Local fallback planner"
+                    engine = "Built-in planner"
             else:
                 plan = build_fallback_plan(extracted_text, project_name)
-                engine = "Local fallback planner"
+                engine = "Built-in planner"
 
             plan = validate_and_normalize_plan(plan)
             project_id = create_project(
@@ -275,6 +282,8 @@ def main() -> None:
 
     if "plan" in st.session_state:
         show_plan(st.session_state["plan"])
+
+    show_footer(st.session_state.get("visit_count", 0))
 
 
 if __name__ == "__main__":

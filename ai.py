@@ -6,9 +6,9 @@ from typing import Any
 
 import requests
 
-from planner import build_fallback_plan, merge_ai_seed_into_plan
+from planner import build_fallback_plan, merge_ai_seed_into_plan, parse_sow_items
 
-AI_ENGINE_VERSION = "groq-qwen38-seed-v3"
+AI_ENGINE_VERSION = "groq-qwen38-guided-structured-v4"
 
 
 @dataclass(frozen=True)
@@ -37,44 +37,57 @@ def _parse_content(content: str) -> dict[str, Any]:
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
         text = "\n".join(lines).strip()
-    return json.loads(text)
+    obj = json.loads(text)
+    if not isinstance(obj, dict):
+        raise RuntimeError("Groq returned JSON, but it was not an object.")
+    return obj
 
 
-def _number_sow_statements(sow_text: str, limit: int = 18) -> list[str]:
-    import re
+def _select_ai_items(items: list[dict[str, Any]], limit: int = 16) -> list[tuple[int, dict[str, Any]]]:
+    """Select useful SOW source items while preserving their original 1-based indexes."""
+    preferred = {"Scope / Workstream", "Deliverable", "Acceptance", "Milestone", "Dependency", "Risk / Constraint", "Assumption"}
+    selected: list[tuple[int, dict[str, Any]]] = []
 
-    sentences = [
-        s.strip()
-        for s in re.split(r"(?<=[.!?])\s+|\n+", sow_text)
-        if s.strip() and len(s.strip()) >= 20
-    ]
-    return sentences[:limit]
+    # Prioritize actual workstreams and obligations first.
+    for idx, item in enumerate(items, 1):
+        if item.get("type") in preferred:
+            selected.append((idx, item))
+        if len(selected) >= limit:
+            break
+
+    # Ensure earlier context is represented for SOWs without enough typed items.
+    if len(selected) < limit:
+        used = {i for i, _ in selected}
+        for idx, item in enumerate(items, 1):
+            if idx not in used:
+                selected.append((idx, item))
+            if len(selected) >= limit:
+                break
+    return selected
 
 
-# Intentionally tiny JSON object. Groq's documented API exposes max_completion_tokens,
-# but this user's organization has reported a 1,000-output-token/minute limit. Keeping
-# the requested completion at 600 and avoiding a large strict JSON schema prevents the
-# planner call from being rejected for expected output size.
 SEED_SYSTEM_PROMPT = """
-You are a senior project/program manager. Analyze the supplied SOW and return a VERY COMPACT
-JSON planning seed for a deterministic planning engine.
+You are a senior project/program manager. Analyze the SOW and return a compact JSON planning seed.
+The deterministic planning engine will create the full WBS and detailed schedule, so you must NOT
+write the entire project plan.
 
 Return ONLY JSON with these keys:
 project_type: short string
 summary: short string
-phases: array of up to 4 short strings
-activities: array of up to 4 objects with name, phase, source_index
-milestones: array of up to 3 short strings
+phases: array of up to 4 objects {phase: short string}
+activities: array of up to 4 objects {name: short string, phase: short string, source_index: integer}
+milestones: array of up to 3 objects {name: short string, target: short string}
 gaps: array of up to 3 short strings
 risks: array of up to 3 short strings
 
 Rules:
+- source_index MUST refer to the exact numbered SOW item shown in the prompt.
 - Use only information supported by the SOW.
-- source_index refers to the numbered SOW statements in the prompt.
-- Keep strings very short.
-- Do not generate a full WBS, traceability matrix, or long explanations.
-- Do not invent dates, budgets, resources, or contractual commitments.
-- Surface ambiguity as a gap.
+- Keep every string short.
+- Prioritize workstreams, major deliverables, acceptance conditions and explicit milestones.
+- Do not convert exclusions, assumptions, responsibilities or risks into activities.
+- Do not invent dates, budgets, resources or contractual commitments.
+- Surface ambiguous or undefined requirements as gaps.
 """.strip()
 
 
@@ -82,16 +95,20 @@ def generate_plan_with_groq(sow_text: str, project_name: str, config: GroqConfig
     if not config.api_key:
         raise RuntimeError("Groq API key is missing.")
 
-    numbered = _number_sow_statements(sow_text)
-    numbered_text = "\n".join(f"{i}. {text}" for i, text in enumerate(numbered, 1))
+    source_items = parse_sow_items(sow_text)
+    selected = _select_ai_items(source_items, limit=16)
+    numbered_text = "\n".join(
+        f"{original_index}. [{item.get('type','Context')}] {item.get('section','')}: {item.get('statement','')}"
+        for original_index, item in selected
+    )
 
     user_prompt = f"""
 Project name: {project_name}
 
-NUMBERED SOW STATEMENTS:
+NUMBERED SOW ITEMS:
 {numbered_text}
 
-Return the compact JSON seed now. Keep the entire answer brief enough for a 600-token maximum response.
+Return the compact JSON seed now. Keep the whole answer comfortably below the model output limit.
 """.strip()
 
     payload = {
@@ -100,14 +117,12 @@ Return the compact JSON seed now. Keep the entire answer brief enough for a 600-
             {"role": "system", "content": SEED_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ],
-        "temperature": 0.2,
+        "temperature": 0.1,
         "reasoning_effort": "none",
         "reasoning_format": "hidden",
-        # Use the current parameter name documented by Groq.
         "max_completion_tokens": 600,
         "response_format": {"type": "json_object"},
     }
-
     headers = {
         "Authorization": f"Bearer {config.api_key}",
         "Content-Type": "application/json",
@@ -127,26 +142,18 @@ Return the compact JSON seed now. Keep the entire answer brief enough for a 600-
     choices = body.get("choices") or []
     if not choices:
         raise RuntimeError(f"Groq returned no choices: {json.dumps(body)[:2000]}")
-
     content = (choices[0].get("message") or {}).get("content")
     if not content:
         raise RuntimeError("Groq returned an empty model response.")
-
     seed = _parse_content(content)
-    if not isinstance(seed, dict):
-        raise RuntimeError("Groq returned JSON, but it was not an object.")
 
-    # Normalize the smaller seed into the existing merge contract.
     normalized = {
-        "project_type": seed.get("project_type", "").strip() if isinstance(seed.get("project_type"), str) else "",
-        "description": seed.get("summary", "").strip() if isinstance(seed.get("summary"), str) else "",
+        "project_type": str(seed.get("project_type", "")).strip(),
+        "description": str(seed.get("summary", "")).strip(),
         "confidence": "High" if seed.get("project_type") else "Medium",
-        "phases": [
-            {"phase": str(x).strip(), "purpose": "AI-suggested phase; PM review required."}
-            for x in (seed.get("phases") or []) if str(x).strip()
-        ][:4],
+        "phases": [x for x in (seed.get("phases") or []) if isinstance(x, dict)][:4],
         "key_activities": [],
-        "milestones": [],
+        "milestones": [x for x in (seed.get("milestones") or []) if isinstance(x, dict)][:3],
         "gaps": [str(x).strip() for x in (seed.get("gaps") or []) if str(x).strip()][:3],
         "risks": [str(x).strip() for x in (seed.get("risks") or []) if str(x).strip()][:3],
         "assumptions": [],
@@ -158,26 +165,27 @@ Return the compact JSON seed now. Keep the entire answer brief enough for a 600-
         name = str(row.get("name", "")).strip()
         if not name:
             continue
+        ref = row.get("source_index")
+        try:
+            source_index = int(ref)
+        except Exception:
+            source_index = None
         normalized["key_activities"].append(
             {
                 "name": name,
-                "phase": str(row.get("phase", "")).strip() or "Execution",
+                "phase": str(row.get("phase", "General Delivery")).strip() or "General Delivery",
                 "duration_days": 5,
                 "owner_role": "Project Team",
-                "source_indexes": [int(row["source_index"]) ] if str(row.get("source_index", "")).isdigit() else [],
+                "source_indexes": [source_index] if source_index is not None else [],
             }
         )
-
-    for item in (seed.get("milestones") or [])[:3]:
-        if isinstance(item, str) and item.strip():
-            normalized["milestones"].append({"name": item.strip(), "target": "TBD"})
 
     base_plan = build_fallback_plan(sow_text, project_name)
     plan = merge_ai_seed_into_plan(base_plan, normalized)
     plan.setdefault("metadata", {})
     plan["metadata"].update(
         {
-            "engine": "groq_qwen38_compact_seed",
+            "engine": "groq_qwen38_guided_structured_planner",
             "engine_version": AI_ENGINE_VERSION,
             "source_characters": len(sow_text),
             "model": config.model,

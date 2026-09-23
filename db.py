@@ -25,6 +25,13 @@ class Project(Base):
     created_at: Mapped[str] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class SiteMetric(Base):
+    __tablename__ = "site_metrics"
+
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
 def _resolve_url(database_url: str | None) -> str:
     url = (database_url or os.getenv("DATABASE_URL", "")).strip()
     if url:
@@ -46,6 +53,27 @@ def init_db(database_url: str | None = None):
     engine = create_engine(url, connect_args=connect_args, pool_pre_ping=True)
     Base.metadata.create_all(engine)
     return engine
+
+
+def record_visit(db_engine) -> int:
+    """Increment the app visit counter and return the new total."""
+    with Session(db_engine) as session:
+        metric = session.get(SiteMetric, "page_visits")
+        if metric is None:
+            metric = SiteMetric(key="page_visits", value=1)
+            session.add(metric)
+        else:
+            metric.value += 1
+        session.commit()
+        session.refresh(metric)
+        return int(metric.value)
+
+
+def get_visit_count(db_engine) -> int:
+    """Return the current page visit counter without changing it."""
+    with Session(db_engine) as session:
+        metric = session.get(SiteMetric, "page_visits")
+        return int(metric.value) if metric is not None else 0
 
 
 def create_project(db_engine, name: str, source_name: str, plan: dict, engine_name: str = "") -> int:

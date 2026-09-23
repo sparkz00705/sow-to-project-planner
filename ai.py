@@ -8,22 +8,19 @@ import requests
 
 
 @dataclass(frozen=True)
-class OpenRouterConfig:
+class GroqConfig:
     api_key: str
-    model: str = "qwen/qwen3.6-27b"
-    base_url: str = "https://openrouter.ai/api/v1"
-    site_url: str = ""
-    app_name: str = "SOW Project Planner"
+    model: str = "qwen/qwen3.8-27b"
+    base_url: str = "https://api.groq.com/openai/v1"
     timeout_seconds: int = 180
 
 
-def get_openrouter_config(api_key: str, model: str, base_url: str, site_url: str, app_name: str) -> OpenRouterConfig:
-    return OpenRouterConfig(
+def get_groq_config(api_key: str, model: str, base_url: str) -> GroqConfig:
+    return GroqConfig(
         api_key=api_key,
-        model=model or "qwen/qwen3.6-27b",
-        base_url=(base_url or "https://openrouter.ai/api/v1").rstrip("/"),
-        site_url=site_url,
-        app_name=app_name or "SOW Project Planner",
+        model=model or "qwen/qwen3.8-27b",
+        base_url=(base_url or "https://api.groq.com/openai/v1").rstrip("/"),
+        timeout_seconds=180,
     )
 
 
@@ -210,9 +207,9 @@ def _parse_content(content: str) -> dict[str, Any]:
     return json.loads(text)
 
 
-def generate_plan_with_openrouter(sow_text: str, project_name: str, config: OpenRouterConfig) -> dict[str, Any]:
+def generate_plan_with_groq(sow_text: str, project_name: str, config: GroqConfig) -> dict[str, Any]:
     if not config.api_key:
-        raise RuntimeError("OpenRouter API key is missing.")
+        raise RuntimeError("Groq API key is missing.")
 
     user_prompt = f"""
 Project name: {project_name}
@@ -232,7 +229,7 @@ Generate the complete project-planning JSON according to the required schema.
             {"role": "user", "content": user_prompt},
         ],
         "temperature": 0.2,
-        "max_tokens": 16000,
+        "max_completion_tokens": 7000,
         "response_format": {
             "type": "json_schema",
             "json_schema": {
@@ -246,28 +243,26 @@ Generate the complete project-planning JSON according to the required schema.
     headers = {
         "Authorization": f"Bearer {config.api_key}",
         "Content-Type": "application/json",
-        "X-Title": config.app_name,
+        "X-Title": "SOW Project Planner",
     }
-    if config.site_url:
-        headers["HTTP-Referer"] = config.site_url
 
     url = f"{config.base_url}/chat/completions"
     response = requests.post(url, headers=headers, json=payload, timeout=config.timeout_seconds)
     if not response.ok:
         detail = response.text[:2000]
-        raise RuntimeError(f"OpenRouter HTTP {response.status_code}: {detail}")
+        raise RuntimeError(f"Groq HTTP {response.status_code}: {detail}")
 
     body = response.json()
     choices = body.get("choices") or []
     if not choices:
-        raise RuntimeError(f"OpenRouter returned no choices: {json.dumps(body)[:2000]}")
+        raise RuntimeError(f"Groq returned no choices: {json.dumps(body)[:2000]}")
     content = choices[0].get("message", {}).get("content")
     if not content:
-        raise RuntimeError("OpenRouter returned an empty model response.")
+        raise RuntimeError("Groq returned an empty model response.")
 
     plan = _parse_content(content)
     plan.setdefault("metadata", {})
-    plan["metadata"]["engine"] = "openrouter"
+    plan["metadata"]["engine"] = "groq"
     plan["metadata"]["source_characters"] = len(sow_text)
     plan["metadata"]["model"] = config.model
     return plan

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import pandas as pd
 import streamlit as st
 
-from ai import generate_plan_with_openrouter, get_openrouter_config
+from ai import generate_plan_with_groq, get_groq_config
 from db import create_project, init_db, list_projects, load_project, record_visit
 from exporter import build_excel_workbook
 from extract import extract_document
@@ -180,17 +180,15 @@ def main() -> None:
         st.success("App is awake.")
         st.stop()
 
-    # Internal configuration is intentionally hidden from end users.
-    # The app uses OpenRouter/Qwen automatically when the secret is configured;
+    # Internal AI configuration is intentionally hidden from end users.
+    # The app uses Groq/Qwen automatically when GROQ_API_KEY is configured;
     # otherwise it falls back to the built-in planner.
-    or_cfg = get_openrouter_config(
-        api_key=get_secret("OPENROUTER_API_KEY", ""),
-        model=get_secret("OPENROUTER_MODEL", "qwen/qwen3.6-27b"),
-        base_url=get_secret("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
-        site_url=get_secret("OPENROUTER_SITE_URL", ""),
-        app_name=get_secret("OPENROUTER_APP_NAME", "SOW Project Planner"),
+    groq_cfg = get_groq_config(
+        api_key=get_secret("GROQ_API_KEY", ""),
+        model=get_secret("GROQ_MODEL", "qwen/qwen3.8-27b"),
+        base_url=get_secret("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
     )
-    use_ai = bool(or_cfg.api_key)
+    use_ai = bool(groq_cfg.api_key)
 
     projects = list_projects(db)
     with st.sidebar:
@@ -255,22 +253,15 @@ def main() -> None:
             source = uploaded.name if uploaded else "Pasted SOW"
             if use_ai:
                 try:
-                    plan = generate_plan_with_openrouter(extracted_text, project_name, or_cfg)
-                    engine = "AI planner"
-                    st.success("AI planner completed successfully.")
+                    plan = generate_plan_with_groq(extracted_text, project_name, groq_cfg)
+                    engine = "Groq AI planner"
                 except Exception as exc:
-                    # Show a safe diagnostic without exposing API credentials.
-                    message = str(exc).replace(or_cfg.api_key, "[redacted]")
-                    if len(message) > 1000:
-                        message = message[:1000] + "..."
-                    st.error(f"AI planner failed: {message}")
-                    st.warning("The built-in planner was used as a fallback. The result below is not an AI-generated plan.")
+                    st.warning(f"Groq AI planning was unavailable, so the built-in planner was used instead. Details: {exc}")
                     plan = build_fallback_plan(extracted_text, project_name)
-                    engine = "Built-in fallback"
+                    engine = "Built-in planner"
             else:
-                st.warning("AI planner is not configured. The built-in planner was used.")
                 plan = build_fallback_plan(extracted_text, project_name)
-                engine = "Built-in fallback"
+                engine = "Built-in planner"
 
             plan = validate_and_normalize_plan(plan)
             project_id = create_project(
@@ -285,7 +276,7 @@ def main() -> None:
             st.session_state["project_id"] = project_id
             st.session_state["generated_at"] = datetime.now(timezone.utc).isoformat()
 
-        st.success(f"Project plan created and saved. Engine: {engine}")
+        st.success(f"Project plan created and saved. {engine}")
 
     if "plan" in st.session_state:
         show_plan(st.session_state["plan"])

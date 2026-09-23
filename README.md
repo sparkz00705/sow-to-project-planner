@@ -5,7 +5,7 @@ A domain-agnostic Streamlit application that transforms a Statement of Work into
 ## Features
 
 - PDF, DOCX, XLSX/XLSM, TXT and Markdown SOW input
-- Qwen3.6 27B through OpenRouter
+- Qwen 3.8 27B through Groq
 - SOW item extraction
 - WBS generation
 - Activities and dependencies
@@ -16,29 +16,18 @@ A domain-agnostic Streamlit application that transforms a Statement of Work into
 - Excel export
 - Saved project history
 - PostgreSQL-ready database layer with SQLite fallback
-- GitHub Actions Selenium wake-up workflow
-
-## Run locally
-
-```bash
-python -m venv .venv
-.venv\\Scripts\\activate
-pip install -r requirements.txt
-streamlit run app.py
-```
+- Selenium wake-up script for scheduled automation
 
 ## Streamlit Cloud
 
 Deploy `app.py` from this repository.
 
-Required secret for AI:
+Required Streamlit secret for AI:
 
 ```toml
-OPENROUTER_API_KEY = "..."
-OPENROUTER_MODEL = "qwen/qwen3.6-27b"
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-OPENROUTER_SITE_URL = "https://YOUR-APP.streamlit.app"
-OPENROUTER_APP_NAME = "SOW Project Planner"
+GROQ_API_KEY = "..."
+GROQ_MODEL = "qwen/qwen3.8-27b"
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 ```
 
 Optional persistent database:
@@ -47,27 +36,16 @@ Optional persistent database:
 DATABASE_URL = "postgresql://user:password@host:5432/dbname"
 ```
 
-If `DATABASE_URL` is omitted, the app uses `data/planner.sqlite3`. Streamlit Community Cloud does not guarantee persistence of local files, so hosted PostgreSQL should be used before treating the app as a production system.
+If `DATABASE_URL` is omitted, the app uses local SQLite. Streamlit Community Cloud does not guarantee persistence of local files across restarts, so use hosted PostgreSQL when saved project history must persist.
 
-## GitHub Actions wake-up
+## Wake-up automation
 
-Create an Actions repository secret:
+`wake_streamlit.py` contains the Selenium wake-up logic. It expects the environment variable `STREAMLIT_APP_URL` to contain the deployed app URL, including `?bot=wake`.
 
-```text
-STREAMLIT_APP_URL=https://YOUR-APP.streamlit.app/?bot=wake
-```
-
-The workflow runs every 10 minutes and opens the application with Selenium. If Streamlit displays its sleep page, the workflow clicks the wake-up button.
+For scheduled execution, place the script in a GitHub Actions workflow and store the URL as an Actions secret.
 
 ## Design principle
 
 The AI proposes. The Project Manager reviews and decides.
 
 The SOW is the source of truth. Inferred planning content is explicitly treated as a proposal or assumption rather than a contractual commitment.
-
-
-## Flat GitHub deployment package
-
-All application Python modules are intentionally kept in the repository root so the files can be uploaded directly through the GitHub web interface without nested application folders.
-
-The optional GitHub Actions workflow is not embedded in this flat package; `wake_streamlit.py` is included as the Selenium wake-up script. A GitHub Actions workflow can be added separately later.

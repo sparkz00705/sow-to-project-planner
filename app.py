@@ -272,6 +272,139 @@ def _show_df(
     )
 
 
+def _first_value(row: dict, names: list[str], default: str = "") -> str:
+    for name in names:
+        value = row.get(name)
+        if value is not None and str(value).strip() and str(value).strip().lower() not in {"nan", "none"}:
+            return str(value).strip()
+    return default
+
+
+def _management_action(text_value: str, kind: str) -> str:
+    text_value = text_value.lower()
+    if any(term in text_value for term in ["clarif", "ambigu", "not defined", "undefined"]):
+        return "Confirm scope, owner and acceptance criteria before baseline."
+    if any(term in text_value for term in ["data", "migration", "reconciliation", "cleansing"]):
+        return "Baseline data ownership, quality checks, reconciliation rules and decision dates."
+    if any(term in text_value for term in ["api", "integration", "interface", "identity"]):
+        return "Confirm external dependency, technical owner, readiness date and fallback path."
+    if any(term in text_value for term in ["uat", "testing", "test", "defect"]):
+        return "Confirm test entry/exit criteria, business capacity and defect decision path."
+    if any(term in text_value for term in ["security", "penetration", "access"]):
+        return "Confirm control ownership, evidence requirements and approval date."
+    if kind == "risk":
+        return "Assign an accountable owner, trigger, mitigation and review date."
+    return "Assign an owner and target date, then close through the project decision log."
+
+
+def _management_rows(rows: list[dict], kind: str) -> list[dict]:
+    output: list[dict] = []
+    for index, row in enumerate(rows, start=1):
+        description = _first_value(
+            row,
+            [
+                "description",
+                "gap",
+                "risk",
+                "risk_description",
+                "issue",
+                "name",
+                "title",
+                "statement",
+                "text",
+            ],
+            default=f"{kind.title()} {index}",
+        )
+        severity = _first_value(
+            row,
+            ["severity", "priority", "rating", "risk_level", "impact"],
+            default="Review",
+        )
+        owner = _first_value(
+            row,
+            ["owner", "owner_role", "responsible", "assigned_to"],
+            default="Assign in PM review",
+        )
+        existing_action = _first_value(
+            row,
+            ["action", "mitigation", "response", "next_action", "recommendation", "resolution"],
+        )
+        due = _first_value(
+            row,
+            ["due", "due_date", "target_date", "target_week", "decision_date"],
+            default="Set in PM review",
+        )
+        status = _first_value(
+            row,
+            ["status", "state", "disposition"],
+            default="Open for review",
+        )
+        output.append(
+            {
+                "ID": _first_value(row, ["id", "gap_id", "risk_id", "item_id"], default=f"{kind[:1].upper()}{index:02d}"),
+                "Item": description,
+                "Severity / Priority": severity,
+                "PM action": existing_action or _management_action(description, kind),
+                "Owner": owner,
+                "Target / Due": due,
+                "Status": status,
+            }
+        )
+    return output
+
+
+def _decision_rows(schedule_rows: list[dict], gaps: list[dict], risks: list[dict]) -> list[dict]:
+    rows: list[dict] = []
+    for row in schedule_rows:
+        if row.get("Status") in {"Review", "Watch"}:
+            variance = row.get("Variance (weeks)", 0)
+            action = (
+                "Re-sequence dependencies or obtain an approved milestone exception."
+                if row.get("Status") == "Review"
+                else "Confirm dependency dates and monitor before baseline."
+            )
+            rows.append(
+                {
+                    "Decision area": "Schedule",
+                    "Decision / issue": row.get("Milestone", ""),
+                    "Evidence": f"SOW {row.get('SOW target', '—')} vs planned {row.get('Planned finish', '—')} ({variance:+g} weeks)",
+                    "PM action": action,
+                }
+            )
+
+    for item in _management_rows(gaps, "gap")[:4]:
+        rows.append(
+            {
+                "Decision area": "Gap",
+                "Decision / issue": item["Item"],
+                "Evidence": item["Severity / Priority"],
+                "PM action": item["PM action"],
+            }
+        )
+
+    for item in _management_rows(risks, "risk")[:4]:
+        rows.append(
+            {
+                "Decision area": "Risk",
+                "Decision / issue": item["Item"],
+                "Evidence": item["Severity / Priority"],
+                "PM action": item["PM action"],
+            }
+        )
+    return rows[:10]
+
+
+def _leader_status(schedule_rows: list[dict], gaps: list[dict], risks: list[dict], coverage: float) -> tuple[str, str]:
+    reviews = sum(1 for row in schedule_rows if row.get("Status") == "Review")
+    high_gaps = sum(1 for row in gaps if _first_value(row, ["severity", "priority", "rating"], "").lower() in {"high", "critical", "severe"})
+    high_risks = sum(1 for row in risks if _first_value(row, ["severity", "priority", "rating", "risk_level", "impact"], "").lower() in {"high", "critical", "severe"})
+    if reviews or high_gaps or high_risks:
+        return "PM review required", f"{reviews} schedule exception(s), {high_gaps} high-severity gap(s), {high_risks} high-severity risk(s) surfaced."
+    if coverage >= 100:
+        return "Ready for PM review", "Traceability is complete and no major schedule exception is currently surfaced."
+    return "PM review required", f"Traceability coverage is {coverage:g}%; review uncovered scope before baseline."
+
+
 def show_plan(plan: dict) -> None:
     """Render the generated plan once per Streamlit run."""
     summary = plan.get("summary", {}) or {}
@@ -286,9 +419,16 @@ def show_plan(plan: dict) -> None:
     wbs = plan.get("wbs", []) or []
     metadata = plan.get("metadata", {}) or {}
 
-    st.subheader("Project Plan Review")
+    st.subheader("Leadership & PM Review")
 
-    # Keep the main PM-review metrics visible at the top.
+    # Leader-facing status: summarize what matters before opening detailed tabs.
+    schedule_rows = _schedule_review(plan)
+    leader_status, leader_detail = _leader_status(schedule_rows, gaps, risks, _coverage(plan))
+    st.info(
+        f"**Plan status: {leader_status}** · {leader_detail} "
+        "This is a decision-support view; PM / sponsor approval is still required before baseline."
+    )
+
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("SOW items", len(sow_items))
     c2.metric("Activities", len(activities))
@@ -309,16 +449,39 @@ def show_plan(plan: dict) -> None:
 
     st.divider()
 
-    st.subheader("Project summary")
+    st.subheader("Executive brief")
     st.write(summary.get("description") or "No summary returned.")
+    eb1, eb2, eb3, eb4 = st.columns(4)
+    review_count = sum(1 for row in schedule_rows if row["Status"] == "Review")
+    watch_count = sum(1 for row in schedule_rows if row["Status"] == "Watch")
+    high_gaps = sum(1 for row in gaps if _first_value(row, ["severity", "priority", "rating"], "").lower() in {"high", "critical", "severe"})
+    high_risks = sum(1 for row in risks if _first_value(row, ["severity", "priority", "rating", "risk_level", "impact"], "").lower() in {"high", "critical", "severe"})
+    eb1.metric("Coverage", f"{_coverage(plan):g}%")
+    eb2.metric("Schedule exceptions", review_count + watch_count)
+    eb3.metric("High gaps", high_gaps)
+    eb4.metric("High risks", high_risks)
     st.caption(
         f"Project type: {summary.get('project_type', 'Unknown')} · "
         f"Planning confidence: {summary.get('confidence', 'N/A')} · "
-        f"Planning engine: {metadata.get('engine', 'Unknown')}"
+        f"Planning engine: {metadata.get('engine', 'Unknown')} · "
+        "Status: generated for PM review, not final approval"
     )
 
+    decision_rows = _decision_rows(schedule_rows, gaps, risks)
+    if decision_rows:
+        st.subheader("PM / sponsor attention")
+        st.dataframe(
+            pd.DataFrame(decision_rows),
+            use_container_width=True,
+            hide_index=True,
+            key="pm_sponsor_attention_table",
+        )
+        st.caption(
+            "These items are surfaced from explicit SOW targets, identified gaps and risks. "
+            "Where the SOW does not provide an owner or due date, the application marks it for PM assignment rather than inventing one."
+        )
+
     # PM-level schedule fit review from the tested SOW targets.
-    schedule_rows = _schedule_review(plan)
     if schedule_rows:
         review_count = sum(1 for row in schedule_rows if row["Status"] == "Review")
         watch_count = sum(1 for row in schedule_rows if row["Status"] == "Watch")
@@ -336,8 +499,12 @@ def show_plan(plan: dict) -> None:
         )
         if review_count:
             st.warning(
-                "Schedule-fit review needed for milestones where the dependency-driven "
-                "plan finishes more than one week after the explicit SOW target."
+                "Schedule-fit review is required where the dependency-driven plan finishes more than one week after the explicit SOW target. "
+                "For the tested sample, the known pressure points include Requirements Sign-off and Future-State Design Approved."
+            )
+        elif watch_count:
+            st.warning(
+                "Some milestones are one week later than the explicit SOW target; confirm dependencies before baselining."
             )
 
     tabs = st.tabs(
@@ -473,27 +640,32 @@ def show_plan(plan: dict) -> None:
         if gdf.empty:
             st.success("No planning gaps were identified.")
         else:
-            high_count = int((gdf["severity"].astype(str).str.lower() == "high").sum()) if "severity" in gdf else 0
+            high_count = int((gdf["severity"].astype(str).str.lower().isin(["high", "critical", "severe"])).sum()) if "severity" in gdf else 0
             st.metric("High-severity gaps", high_count)
             st.dataframe(
-                gdf,
+                pd.DataFrame(_management_rows(gaps, "gap")),
                 use_container_width=True,
                 hide_index=True,
-                key="gaps_table",
+                key="gap_management_table",
             )
+            with st.expander("View extracted gap detail"):
+                st.dataframe(gdf, use_container_width=True, hide_index=True, key="gaps_detail_table")
 
     with tabs[6]:
         rdf = pd.DataFrame(risks)
         if rdf.empty:
             st.success("No planning risks were identified.")
         else:
+            high_count = int((rdf["severity"].astype(str).str.lower().isin(["high", "critical", "severe"])).sum()) if "severity" in rdf else 0
             st.metric("Risks", len(rdf))
             st.dataframe(
-                rdf,
+                pd.DataFrame(_management_rows(risks, "risk")),
                 use_container_width=True,
                 hide_index=True,
-                key="risks_table",
+                key="risk_management_table",
             )
+            with st.expander("View extracted risk detail"):
+                st.dataframe(rdf, use_container_width=True, hide_index=True, key="risks_detail_table")
 
     with tabs[7]:
         adf = pd.DataFrame(assumptions)
@@ -519,13 +691,22 @@ def show_plan(plan: dict) -> None:
             st.info("No planning constraints were identified.")
 
     with tabs[8]:
-        st.json(plan)
+        with st.expander("Show raw machine-readable plan"):
+            st.json(plan)
+        st.caption(
+            "Raw JSON is retained for audit/debugging and integrations; leaders should use the Executive brief and PM / sponsor attention view."
+        )
 
+    st.divider()
+    st.subheader("Management export")
+    st.caption(
+        "The Excel export contains the detailed project-plan data for PM review, governance and downstream reporting."
+    )
     excel_bytes = build_excel_workbook(plan)
     st.download_button(
         "⬇️ Download Project Plan (Excel)",
         data=excel_bytes,
-        file_name="sow_project_plan.xlsx",
+        file_name="sow_project_plan_management_pack.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="download_project_plan_excel",
         on_click="ignore",

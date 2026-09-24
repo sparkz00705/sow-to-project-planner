@@ -1196,7 +1196,7 @@ def main() -> None:
                     plan = merge_ai_advice(plan, ai_advice)
                     plan["metadata"]["engine"] = "groq_qwen38_hybrid"
                     plan["metadata"]["engine_version"] = (
-                        "planner-v6 + groq-qwen38-advice"
+                        "planner-v7 + groq-qwen38-advice"
                     )
                     engine = "Groq AI planner + planning engine"
                 except Exception as exc:

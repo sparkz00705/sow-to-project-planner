@@ -6,7 +6,7 @@ import re
 from copy import deepcopy
 from typing import Any
 
-PLANNER_VERSION = "v6.0"
+PLANNER_VERSION = "v7.0"
 
 
 def _stable_id(prefix: str, text: str, index: int = 0) -> str:
@@ -53,7 +53,7 @@ _SCOPE_SUBHEADINGS = {
     "project management", "requirements", "solution design", "configuration", "data migration",
     "testing", "training", "deployment", "hypercare", "implementation", "discovery", "design",
     "build", "integration", "security", "change management", "cutover", "support", "operations",
-    "project governance", "reporting", "quality", "validation", "data",
+    "project governance", "reporting", "quality", "validation", "data", "data quality",
 }
 
 
@@ -291,23 +291,39 @@ def _find(items: list[dict[str, Any]], *terms: str) -> list[dict[str, Any]]:
 
 
 def _duration(activity_name: str) -> int:
+    """Planning effort estimate in working days. These are advisory estimates, not SOW commitments."""
     n = activity_name.lower()
     rules = [
-        (["kickoff"], 2), (["governance"], 5), (["stakeholder"], 5),
+        (["kickoff"], 2),
+        (["governance", "raid", "decisions and change control"], 5),
+        (["stakeholder"], 5),
         (["current-state", "discovery", "assessment"], 10),
-        (["requirements workshop", "requirements"], 15),
-        (["future-state", "solution architecture", "solution design"], 15),
-        (["environment"], 7), (["configuration", "configure"], 20),
-        (["erp integration", "integration"], 15), (["sso", "identity"], 10),
-        (["document-management", "email integration", "collaboration"], 8),
-        (["data profiling", "data mapping", "data cleansing"], 10),
-        (["trial migration", "rehearsal"], 12), (["data migration"], 15),
-        (["test strategy"], 5), (["sit", "system integration testing"], 10),
-        (["performance testing", "security testing"], 7), (["uat"], 10),
-        (["defect"], 8), (["training materials"], 7), (["training"], 10),
-        (["cutover", "readiness"], 5), (["wave 1", "wave 2", "wave 3"], 3),
-        (["hypercare"], 22), (["knowledge transfer", "handover"], 5),
-        (["closure"], 3),
+        (["requirements workshop", "consolidate requirements"], 10),
+        (["validate requirements", "obtain requirements", "requirements sign-off", "requirements approved"], 2),
+        (["future-state", "solution architecture", "solution design", "technical design"], 10),
+        (["environment"], 5),
+        (["configuration", "configure"], 10),
+        (["erp integration", "enterprise-system integrations"], 10),
+        (["integration"], 10),
+        (["sso", "identity"], 5),
+        (["document-management", "email integration", "collaboration"], 5),
+        (["data profiling", "data mapping", "data cleansing"], 5),
+        (["source data receipt", "migration readiness"], 1),
+        (["trial migration", "rehearsal"], 5),
+        (["data migration"], 10),
+        (["test strategy", "test plan"], 3),
+        (["sit", "system integration testing", "functional testing"], 5),
+        (["performance testing", "security testing"], 5),
+        (["uat", "acceptance"], 5),
+        (["defect"], 5),
+        (["training materials", "user guide"], 5),
+        (["training"], 5),
+        (["cutover", "readiness"], 3),
+        (["wave 1", "wave 2", "wave 3"], 2),
+        (["production deployment"], 2),
+        (["hypercare"], 10),
+        (["knowledge transfer", "handover"], 3),
+        (["closure"], 2),
     ]
     for keys, days in rules:
         if any(k in n for k in keys):
@@ -477,18 +493,18 @@ def _proposed_milestones(existing: list[dict[str, Any]], activities: list[dict[s
 def _build_workstream_activities(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     acts: list[dict[str, Any]] = []
     a1 = _add_activity(acts, 1, "Governance", "Project kickoff and charter approval", _sources(items, "kickoff", "project charter"))
-    a2 = _add_activity(acts, 1, "Governance", "Establish governance, RAID, decisions and change control", _sources(items, "governance", "raid", "change control"), [a1])
-    a3 = _add_activity(acts, 2, "Discovery & Requirements", "Conduct discovery and current-state assessment", _sources(items, "discovery", "current-state"), [a2])
+    a2 = _add_activity(acts, 1, "Governance", "Establish governance, RAID, decisions and change control", _sources(items, "governance", "raid", "change control", "weekly status", "status meetings", "status reporting"), [a1])
+    a3 = _add_activity(acts, 2, "Discovery & Requirements", "Conduct discovery and current-state assessment", _sources(items, "discovery", "current-state"), [a1])
     a4 = _add_activity(acts, 2, "Discovery & Requirements", "Conduct requirements workshops and consolidate requirements", _sources(items, "requirements", "requirements workshops"), [a3])
     a5 = _add_activity(acts, 2, "Discovery & Requirements", "Validate requirements and obtain requirements sign-off", _sources(items, "requirements sign-off", "requirements"), [a4])
-    a6 = _add_activity(acts, 3, "Process & Solution Design", "Design future-state processes, workflows and approval rules", _sources(items, "future-state", "workflows", "approval matrices"), [a5])
+    a6 = _add_activity(acts, 3, "Process & Solution Design", "Design future-state processes, workflows and approval rules", _sources(items, "future-state", "future state", "process design", "workflow design", "approval rules", "approval matrix"), [a5])
     a7 = _add_activity(acts, 3, "Process & Solution Design", "Complete solution architecture and technical design", _sources(items, "solution architecture", "technical design", "solution design"), [a5])
     a8 = _add_activity(acts, 4, "Build & Configuration", "Prepare Development, Test, Validation and Production environments", _sources(items, "environments"), [a7])
     a9 = _add_activity(acts, 4, "Build & Configuration", "Configure platform workflows, rules, roles, permissions and reporting", _sources(items, "configure", "customer fields", "workflow", "standard reports", "reports", "business rules", "roles", "dashboards"), [a6, a8])
     a10 = _add_activity(acts, 5, "Integration & Data", "Implement ERP and enterprise-system integrations", _sources(items, "erp integration", "erp", "integration"), [a7, a8])
     a11 = _add_activity(acts, 5, "Integration & Data", "Implement identity, SSO and access controls", _sources(items, "sso", "identity", "provisioning"), [a7, a8])
     a12 = _add_activity(acts, 5, "Integration & Data", "Implement document, email and collaboration integrations", _sources(items, "document-management", "email", "collaboration"), [a7, a8])
-    a13 = _add_activity(acts, 5, "Integration & Data", "Profile, map and cleanse migration data", _sources(items, "data profiling", "data mapping", "data cleansing", "historical data"), [a3])
+    a13 = _add_activity(acts, 5, "Integration & Data", "Profile, review and cleanse source data", _sources(items, "data profiling", "data mapping", "data cleansing", "historical data", "data quality", "customer records", "duplicate"), [a3])
     a13b = _add_activity(acts, 5, "Integration & Data", "Confirm source data receipt and migration readiness", _sources(items, "source data", "data extract", "data delivery", "source-data"), [a3])
     next(a for a in acts if a["activity_id"] == a13b)["duration_days"] = 1
     a14 = _add_activity(acts, 5, "Integration & Data", "Execute trial migration and reconcile results", _sources(items, "trial migration", "reconciliation"), [a13, a13b, a9])
@@ -496,7 +512,7 @@ def _build_workstream_activities(items: list[dict[str, Any]]) -> tuple[list[dict
     a16 = _add_activity(acts, 6, "Testing & Acceptance", "Execute functional testing and System Integration Testing", _sources(items, "system testing", "functional testing", "sit", "user acceptance testing"), [a15, a9, a10, a11, a12, a14])
     a17 = _add_activity(acts, 6, "Testing & Acceptance", "Execute performance and security testing", _sources(items, "performance testing", "security testing"), [a16])
     a18 = _add_activity(acts, 6, "Testing & Acceptance", "Support UAT, defect resolution and retesting", _sources(items, "uat", "defect", "retesting"), [a16, a17])
-    a19 = _add_activity(acts, 6, "Testing & Acceptance", "Obtain business acceptance / UAT sign-off", _sources(items, "business acceptance", "go-live requires", "acceptance"), [a18])
+    a19 = _add_activity(acts, 6, "Testing & Acceptance", "Obtain business acceptance / UAT sign-off", _sources(items, "business acceptance", "uat sign-off", "uat signoff", "go-live requires"), [a18])
     a20 = _add_activity(acts, 7, "Training & Change", "Develop training materials and change-readiness content", _sources(items, "training materials", "user guide", "change management"), [a6])
     a21 = _add_activity(acts, 7, "Training & Change", "Deliver end-user, administrator and support training", _sources(items, "train end users", "administrator training", "training"), [a20])
     a22 = _add_activity(acts, 8, "Deployment & Transition", "Complete cutover and deployment readiness assessment", _sources(items, "cutover", "readiness"), [a19, a21, a14])
@@ -523,7 +539,6 @@ def _build_workstream_activities(items: list[dict[str, Any]]) -> tuple[list[dict
         "Project kickoff and charter approval",
         "Establish governance, RAID, decisions and change control",
         "Develop test strategy and test plan",
-        "Complete cutover and deployment readiness assessment",
     }
     kept = [a for a in acts if a["source_sow_ids"] or a["activity_name"] in keep_always]
 
@@ -828,6 +843,226 @@ _SCHEDULE_ACTIVITY_RULES = {
     "hypercare complete": ["provide hypercare and stabilize production"],
 }
 
+
+
+def _activity_milestone_anchor_map(milestones: list[dict[str, Any]], activities: list[dict[str, Any]]) -> dict[str, int]:
+    """Map activities to explicit SOW milestone week targets using the same controlled
+    vocabulary used by schedule reconciliation. Earliest applicable target wins when
+    an activity can satisfy more than one milestone. AI does not participate here.
+    """
+    anchors: dict[str, int] = {}
+    for milestone in milestones:
+        if milestone.get("source") != "Explicit SOW milestone":
+            continue
+        target = _target_week(milestone.get("target"))
+        if target is None:
+            continue
+        name = _norm(milestone.get("name", ""))
+        normalized_name = re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
+        # UAT readiness is a governance/readiness checkpoint, not a hard anchor for
+        # the test-plan activity; anchoring test planning to a milestone that occurs
+        # after SIT creates a false dependency loop in otherwise feasible SOWs.
+        if normalized_name == "uat readiness":
+            continue
+        label_key = next((k for k in _SCHEDULE_ACTIVITY_RULES if k in normalized_name), None)
+        target_activity_names = {
+            re.sub(r"[^a-z0-9]+", " ", x.lower()).strip()
+            for x in _SCHEDULE_ACTIVITY_RULES.get(label_key, [])
+        }
+        source_ids = set(str(x).strip() for x in (milestone.get("source_sow_ids") or []) if str(x).strip())
+        candidates: list[tuple[int, dict[str, Any]]] = []
+        for activity in activities:
+            aname = _norm(activity.get("activity_name", ""))
+            anorm = re.sub(r"[^a-z0-9]+", " ", aname.lower()).strip()
+            mname = re.sub(r"[^a-z0-9]+", " ", str(activity.get("milestone_name", "")).lower()).strip()
+            aid_sources = set(str(x).strip() for x in (activity.get("source_sow_ids") or []) if str(x).strip())
+            source_match = bool(source_ids & aid_sources)
+            if mname and (mname == normalized_name or normalized_name in mname or mname in normalized_name):
+                candidates.append((1200 + (200 if source_match else 0), activity))
+                continue
+            if anorm in target_activity_names:
+                candidates.append((900 + (150 if source_match else 0), activity))
+                continue
+            terms = _schedule_terms(name)
+            searchable = f"{anorm} {re.sub(r'[^a-z0-9]+', ' ', str(activity.get('deliverable', '')).lower())}"
+            hits = sum(1 for term in terms if _phrase_hit(term, searchable))
+            if source_match and hits >= 1:
+                candidates.append((650 + hits * 10, activity))
+        if not candidates:
+            continue
+        candidates.sort(key=lambda x: (x[0], -int(str(x[1].get("activity_id", "ACT-999")).split("-")[-1] or 999)), reverse=True)
+        best = candidates[0][1]
+        aid = str(best.get("activity_id", ""))
+        anchors[aid] = min(target, anchors.get(aid, target))
+    return anchors
+
+
+def _topological_activity_order(activities: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_id = {str(a.get("activity_id")): a for a in activities}
+    ordered: list[dict[str, Any]] = []
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(aid: str) -> None:
+        if aid in visited:
+            return
+        if aid in visiting:
+            raise ValueError(f"Activity dependency cycle detected at {aid}")
+        visiting.add(aid)
+        for dep in by_id.get(aid, {}).get("dependency_ids", []) or []:
+            if dep in by_id:
+                visit(dep)
+        visiting.remove(aid)
+        visited.add(aid)
+        ordered.append(by_id[aid])
+
+    for aid in by_id:
+        visit(aid)
+    return ordered
+
+
+def _schedule_activities_against_sow(activities: list[dict[str, Any]], milestones: list[dict[str, Any]], sow_duration_week: int | None) -> list[dict[str, Any]]:
+    """Schedule planning activities inside explicit SOW milestone commitments.
+
+    Milestone targets are treated as contractual anchors. Activity effort estimates are
+    advisory and may be compressed within a milestone window; the engine records that
+    adjustment instead of allowing arbitrary template effort to push a simple SOW to
+    Week 20+.
+    """
+    if not activities:
+        return activities
+    anchors = _activity_milestone_anchor_map(milestones, activities)
+    order = _topological_activity_order(activities)
+    pos = {str(a.get("activity_id")): i for i, a in enumerate(order)}
+    anchored_positions = sorted((pos[aid], week) for aid, week in anchors.items() if aid in pos)
+    by_id = {str(a.get("activity_id")): a for a in order}
+    finish: dict[str, int] = {}
+    exceptions: list[str] = []
+
+    reverse: dict[str, list[str]] = {str(x.get("activity_id")): [] for x in order}
+    for candidate in order:
+        cid = str(candidate.get("activity_id"))
+        for dep in candidate.get("dependency_ids", []) or []:
+            if dep in reverse:
+                reverse[dep].append(cid)
+
+    nominal_weeks_by_id = {
+        str(a.get("activity_id")): max(1, math.ceil(max(int(a.get("duration_days") or 1), 1) / 5))
+        for a in order
+    }
+    deadline_memo: dict[str, int | None] = {}
+
+    def downstream_deadline(aid: str, seen: set[str] | None = None) -> int | None:
+        if aid in deadline_memo:
+            return deadline_memo[aid]
+        seen = set(seen or set())
+        if aid in seen:
+            return None
+        seen.add(aid)
+        deadlines: list[int] = []
+        for child in reverse.get(aid, []):
+            # Dependencies reserve one scheduling week by default. Detailed duration
+            # estimates are advisory and may be compressed to honor explicit SOW anchors.
+            child_weeks = 1
+            if child in anchors:
+                # The child itself is contractually anchored; do not also propagate
+                # a later descendant deadline through the same node.
+                deadlines.append(anchors[child] - child_weeks)
+            else:
+                child_deadline = downstream_deadline(child, seen.copy())
+                if child_deadline is not None:
+                    deadlines.append(child_deadline - child_weeks)
+        result = min(deadlines) if deadlines else None
+        deadline_memo[aid] = result
+        return result
+
+    for idx, a in enumerate(order):
+        aid = str(a.get("activity_id"))
+        pred_finish = 0
+        same_week_dependency = bool(re.search(r"\b(?:approval|sign[- ]?off|acceptance|handover|closure)\b", str(a.get("activity_name", "")).lower()))
+        for dep in a.get("dependency_ids", []) or []:
+            if dep in finish:
+                lag_weeks = math.ceil(max(int(a.get("dependency_lag_days") or 0), 0) / 5)
+                dependency_finish = finish[dep] + lag_weeks
+                pred_finish = max(pred_finish, dependency_finish)
+        nominal_weeks = max(1, math.ceil(max(int(a.get("duration_days") or 1), 1) / 5))
+        target = anchors.get(aid)
+
+        # The earliest downstream explicit milestone provides a delivery window for
+        # preceding work. Use the dependency graph rather than list position so parallel
+        # work such as training can complete before the go-live milestone.
+        window_end = downstream_deadline(aid)
+        if target is not None:
+            desired_finish = target
+        elif window_end is not None:
+            desired_finish = window_end
+        elif sow_duration_week is not None:
+            desired_finish = pred_finish if same_week_dependency else pred_finish + nominal_weeks
+        else:
+            desired_finish = pred_finish if same_week_dependency else pred_finish + nominal_weeks
+
+        earliest_start = max(1, pred_finish if same_week_dependency else pred_finish + 1)
+        if target is not None:
+            # Explicit milestone targets are hard anchors. Fit the activity into the
+            # remaining window; estimated effort can be compressed because it is advisory.
+            available_weeks = target - earliest_start + 1
+            if available_weeks >= 1:
+                scheduled_weeks = min(nominal_weeks, available_weeks)
+                end = target
+                start = target - scheduled_weeks + 1
+                if start < earliest_start:
+                    start = earliest_start
+                    end = target
+                if scheduled_weeks < nominal_weeks:
+                    a["schedule_adjustment"] = (
+                        f"Planning effort compressed from {nominal_weeks} estimated week(s) to "
+                        f"fit the SOW milestone target; PM review required."
+                    )
+            else:
+                start = earliest_start
+                end = start + nominal_weeks - 1
+                exceptions.append(f"{a.get('activity_name')}: cannot meet SOW milestone target Week {target}; dependency chain requires Week {end}.")
+        else:
+            # For planning-only activities, fit the advisory effort inside the available
+            # SOW window rather than letting a template duration extend the project.
+            if desired_finish >= earliest_start:
+                available_weeks = desired_finish - earliest_start + 1
+                scheduled_weeks = min(nominal_weeks, available_weeks)
+                start = desired_finish - scheduled_weeks + 1
+                if start < earliest_start:
+                    start = earliest_start
+                end = desired_finish
+                if scheduled_weeks < nominal_weeks:
+                    a["schedule_adjustment"] = (
+                        f"Planning effort compressed from {nominal_weeks} estimated week(s) to "
+                        f"fit the SOW milestone window; PM review required."
+                    )
+            else:
+                start = earliest_start
+                end = start + nominal_weeks - 1
+                exceptions.append(f"{a.get('activity_name')}: cannot fit before the next SOW milestone window.")
+
+        a["start_week"] = int(start)
+        a["finish_week"] = int(end)
+        a["start_day"] = (int(start) - 1) * 5 + 1
+        a["finish_day"] = int(end) * 5
+        actual_weeks = end - start + 1
+        a["scheduled_duration_days"] = actual_weeks * 5
+        if actual_weeks < nominal_weeks:
+            a["schedule_adjustment"] = f"Planning effort compressed from {nominal_weeks} estimated week(s) to fit the SOW milestone window; PM review required."
+        finish[aid] = int(end)
+
+    if exceptions:
+        # Preserve the details for reconciliation/diagnostics without converting them
+        # into SOW gaps. These are schedule-fit findings, not source-contract ambiguities.
+        for a in activities:
+            a.setdefault("schedule_warnings", [])
+        by_name = {str(a.get("activity_name")): a for a in activities}
+        for message in exceptions:
+            name = message.split(": cannot", 1)[0]
+            if name in by_name:
+                by_name[name].setdefault("schedule_warnings", []).append(message)
+    return activities
 
 def build_schedule_review(milestones: list[dict[str, Any]], activities: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Single source of truth for explicit SOW milestone reconciliation."""
@@ -1165,8 +1400,9 @@ def build_deterministic_plan(sow_text: str, project_name: str) -> dict[str, Any]
     source_structure = _source_structure(sow_text, items)
     activities, wbs = _build_workstream_activities(items)
     milestones = _proposed_milestones(_parse_explicit_milestones(items), activities, items)
-    trace, gaps, risks, assumptions, constraints = _build_quality_records(items, activities)
     sow_duration = _parse_duration(sow_text)
+    activities = _schedule_activities_against_sow(activities, milestones, sow_duration.get("week_equivalent"))
+    trace, gaps, risks, assumptions, constraints = _build_quality_records(items, activities)
 
     text = sow_text.lower()
     if any(k in text for k in ["implement", "platform", "integration", "migration", "deployment", "erp", "sso"]):

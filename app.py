@@ -24,6 +24,44 @@ st.set_page_config(
     layout="wide",
 )
 
+# Responsive PMO metric-card styling. Streamlit metric labels/captions can
+# truncate long leadership wording on narrower cards; allow natural wrapping
+# without changing the underlying values or terminology.
+st.markdown(
+    """
+    <style>
+    div[data-testid="stMetricLabel"] p {
+        white-space: normal !important;
+        overflow: visible !important;
+        text-overflow: clip !important;
+        line-height: 1.2 !important;
+        word-break: normal !important;
+        overflow-wrap: anywhere !important;
+    }
+    div[data-testid="stMetricValue"] {
+        white-space: normal !important;
+        overflow: visible !important;
+        text-overflow: clip !important;
+        line-height: 1.1 !important;
+        overflow-wrap: anywhere !important;
+    }
+    div[data-testid="stCaptionContainer"] p {
+        white-space: normal !important;
+        overflow: visible !important;
+        text-overflow: clip !important;
+        line-height: 1.35 !important;
+        overflow-wrap: anywhere !important;
+    }
+    @media (max-width: 1100px) {
+        div[data-testid="stMetricValue"] {
+            font-size: 1.55rem !important;
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 # -----------------------------------------------------------------------------
 # Complex test SOW used during MVP / QA validation.

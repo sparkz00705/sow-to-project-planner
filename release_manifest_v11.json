@@ -1,0 +1,11 @@
+{
+  "release": "SOW Project Planner v11 Release Candidate",
+  "planner_version": "v11.0",
+  "deploy_files": [
+    "app.py",
+    "planner.py"
+  ],
+  "verification_script": "qa_public_launch_gate_v11.py",
+  "certification_report": "MVP_PUBLIC_LAUNCH_CERTIFICATION_V11.md",
+  "deployment_readme": "README_DEPLOYMENT_V11.md"
+}

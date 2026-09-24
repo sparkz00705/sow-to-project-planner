@@ -202,6 +202,9 @@ def _schedule_review(plan: dict) -> list[dict[str, object]]:
 
     synonym_rules = {
         "project kickoff": ["project kickoff", "kickoff", "charter"],
+        "wave 1 go-live": ["wave 1", "wave 1 go-live", "wave 1 production deployment"],
+        "wave 2 go-live": ["wave 2", "wave 2 go-live", "wave 2 production deployment"],
+        "wave 3 go-live": ["wave 3", "wave 3 go-live", "wave 3 production deployment"],
         "discovery complete": ["discovery", "current state", "current-state", "assessment"],
         "requirements sign-off": ["requirements sign off", "requirements sign-off", "requirements approved", "validate requirements"],
         "requirements approved": ["requirements approved", "requirements sign off", "requirements sign-off", "validate requirements"],
@@ -725,6 +728,9 @@ def show_plan(plan: dict) -> None:
         "Leadership metrics distinguish SOW-derived findings, AI planning recommendations, and schedule-fit findings. "
         "AI recommendations are advisory and do not change contractual SOW commitments."
     )
+    st.caption(
+        "SOW item count includes substantive source statements. Section headings and administrative metadata are excluded from the SOW item register."
+    )
 
     recon_errors = list(metadata.get("reconciliation_errors", []) or [])
     recon_warnings = list(metadata.get("reconciliation_warnings", []) or [])
@@ -1190,7 +1196,7 @@ def main() -> None:
                     plan = merge_ai_advice(plan, ai_advice)
                     plan["metadata"]["engine"] = "groq_qwen38_hybrid"
                     plan["metadata"]["engine_version"] = (
-                        "planner-v5 + groq-qwen38-advice"
+                        "planner-v6 + groq-qwen38-advice"
                     )
                     engine = "Groq AI planner + planning engine"
                 except Exception as exc:

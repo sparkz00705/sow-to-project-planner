@@ -6,7 +6,7 @@ import re
 from copy import deepcopy
 from typing import Any
 
-PLANNER_VERSION = "v5.0"
+PLANNER_VERSION = "v6.0"
 
 
 def _stable_id(prefix: str, text: str, index: int = 0) -> str:
@@ -27,104 +27,166 @@ def _contains_any(text: str, phrases: list[str]) -> bool:
     return any(p.lower() in t for p in phrases)
 
 
+def _clean_source_line(line: str) -> str:
+    clean = re.sub(r"^\s*#{1,6}\s*", "", str(line or "")).strip()
+    clean = re.sub(r"^\s*\*\*(.+?)\*\*\s*$", r"\1", clean).strip()
+    clean = re.sub(r"^\s*(?:[-*•]\s+|\d+[.)]\s+)", "", clean).strip()
+    return clean
+
+
+_METADATA_LABELS = {
+    "project name", "project", "sow reference", "sow id", "reference",
+    "planned duration", "duration", "users", "target users", "target countries",
+    "project type", "planned schedule", "prepared by", "version", "date",
+}
+
+_TOP_LEVEL_SECTIONS = {
+    "purpose", "objective", "project objective", "project objectives", "scope", "in scope", "out of scope",
+    "dependencies", "client responsibilities", "implementation partner responsibilities", "resources",
+    "major deliverables", "deliverables", "major milestones", "milestones", "schedule assumptions",
+    "commercial assumptions", "assumptions", "acceptance criteria", "risks", "risks and constraints",
+    "constraints", "governance", "reporting", "change control", "definition of done", "clarifications",
+    "geographic and organizational scope", "organizational scope",
+}
+
+_SCOPE_SUBHEADINGS = {
+    "project management", "requirements", "solution design", "configuration", "data migration",
+    "testing", "training", "deployment", "hypercare", "implementation", "discovery", "design",
+    "build", "integration", "security", "change management", "cutover", "support", "operations",
+    "project governance", "reporting", "quality", "validation", "data",
+}
+
+
+def _is_heading(clean: str, current_section: str) -> tuple[bool, str]:
+    raw = str(clean or "").strip()
+    had_markdown = bool(re.match(r"^\s*#{1,6}\s*", raw))
+    raw_no_md = re.sub(r"^\s*#{1,6}\s*", "", raw).strip()
+    normalized = re.sub(r"[^a-z0-9]+", " ", raw_no_md.rstrip(":").lower()).strip()
+    if not normalized:
+        return False, current_section
+
+    # Canonicalize numbered Markdown/plain-text sections: '6. Major Milestones'
+    # becomes 'major milestones'.
+    numbered = re.sub(r"^(?:\d+(?:\.\d+)*|section\s+\d+)\s*[-.):]?\s*", "", normalized).strip()
+    if numbered in _TOP_LEVEL_SECTIONS:
+        return True, numbered
+
+    # Explicit Markdown headings that are not in our known section list remain headings.
+    if had_markdown and len(normalized.split()) <= 12:
+        return True, numbered or normalized
+
+    if normalized in _TOP_LEVEL_SECTIONS:
+        return True, normalized
+
+    # Workstream headings are headings only. Their content is classified as scope/work.
+    if re.match(r"^workstream\s+\d+\b", normalized):
+        return True, normalized
+
+    # Scope subsection headings such as 'Project Management' are common in plain-text SOWs.
+    if (current_section in {"scope", "in scope"} or current_section in _SCOPE_SUBHEADINGS or current_section.startswith("workstream ")) and normalized in _SCOPE_SUBHEADINGS:
+        return True, normalized
+    return False, current_section
+
+
 def _sentences(text: str) -> list[tuple[str, str]]:
-    """Return (section, statement) pairs from prose/markdown SOW text."""
-    current_section = "Unspecified"
+    """Parse substantive SOW statements from Markdown or plain text.
+
+    Section headings and administrative metadata are not SOW items. Plain-text
+    subsection headings are recognised inside Scope so short work statements such
+    as 'Project kickoff' remain executable source items.
+    """
+    raw_lines = str(text or "").replace("\r", "").split("\n")
+    current_section = "unspecified"
     out: list[tuple[str, str]] = []
-    raw_lines = [line.strip() for line in text.replace("\r", "").split("\n") if line.strip()]
-    for line in raw_lines:
-        clean = re.sub(r"^#{1,6}\s*", "", line).strip()
-        clean = re.sub(r"^\*\*(.+?)\*\*$", r"\1", clean).strip()
-        heading = (
-            len(clean) <= 90
-            and not clean.startswith(("-", "*", "•"))
-            and "|" not in clean
-            and (
-                re.match(r"^\d+(\.\d+)*[\.)]?\s+[A-Za-z]", clean)
-                or clean.lower() in {
-                    "purpose", "project objectives", "scope", "in scope", "out of scope",
-                    "dependencies", "client responsibilities", "implementation partner responsibilities",
-                    "resources", "major deliverables", "deliverables", "major milestones",
-                    "schedule assumptions", "commercial assumptions", "acceptance criteria",
-                    "risks and constraints", "risks", "governance", "reporting", "change control",
-                    "definition of done", "geographic and organizational scope",
-                }
-                or clean.lower().startswith(("workstream ", "section "))
-            )
-        )
-        if heading and len(clean.split()) <= 12 and not clean.endswith("."):
-            current_section = clean
+
+    for raw_line in raw_lines:
+        if not raw_line.strip():
+            continue
+        raw = raw_line.strip()
+        clean = _clean_source_line(raw)
+        if not clean:
             continue
 
-        # Treat bullets and table-like rows as content. Split on sentence boundaries;
-        # preserve long contractual semicolon lists as a single source statement so
-        # downstream parsing can split them intentionally by register type.
-        parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+|\n+", clean) if p.strip()]
-        if len(parts) == 1 and ";" in clean and len(clean) > 240:
-            parts = [clean]
+        is_heading, section_name = _is_heading(raw, current_section)
+        if is_heading:
+            current_section = section_name
+            continue
+
+        # Remove administrative metadata such as 'Users:' and 'Planned Duration:'.
+        if ":" in clean:
+            label, value = clean.split(":", 1)
+            label_norm = re.sub(r"[^a-z0-9]+", " ", label.lower()).strip()
+            if label_norm in _METADATA_LABELS:
+                continue
+            # A previously unknown short colon label is treated as a section heading,
+            # not as a source statement, when it has no sentence/verb content.
+            if not value.strip() and len(label_norm.split()) <= 8:
+                current_section = label_norm
+                continue
+
+        # Split explicit milestone lists by semicolon, but preserve ordinary prose.
+        if current_section in {"major milestones", "milestones"} and ";" in clean:
+            parts = [p.strip() for p in re.split(r";\s*", clean) if p.strip()]
+        else:
+            parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", clean) if p.strip()]
+
         for part in parts:
-            part = re.sub(r"^(?:[-*•]\s+|\d+[.)]\s+)", "", part).strip()
-            if len(part) >= 12:
+            part = re.sub(r"^\s*(?:[-*•]\s+|\d+[.)]\s+)", "", part).strip()
+            if len(part) >= 3:
                 out.append((current_section, _norm(part)))
     return out
 
 
 def _classify(section: str, statement: str) -> tuple[str, bool, str]:
-    s = statement.lower()
-    sec = section.lower()
-    if "out of scope" in sec or "excludes" in s or "excluded" in s or "outside the scope" in s:
-        return "Out of Scope", False, "High"
-    if "commercial" in sec or "fee" in s or re.search(r"\b(?:usd|eur|gbp|inr)\s*[\d,]+", s):
-        return "Commercial", False, "Medium"
-    if "client responsibilities" in sec or "implementation partner responsibilities" in sec:
-        return "Responsibility", False, "High"
-    if s.startswith("client:") or s.startswith("implementation partner:"):
-        return "Responsibility", False, "High"
-    # A dedicated milestone section is authoritative. Preserve every listed
-    # milestone even when its target is a date, quarter, or not stated.
-    if "major milestones" in sec or sec == "milestones" or sec.endswith(" milestones"):
-        return "Milestone", False, "High"
-    if any(
-        p in s
-        for p in [
-            "not defined", "not stated", "unclear", "not specified", "does not define",
-            "undefined", "no entry/exit", "no numerical target", "not provided", "tbd",
-        ]
-    ):
+    s = statement.lower().strip()
+    sec = re.sub(r"[^a-z0-9]+", " ", str(section or "").lower()).strip()
+
+    # Explicit ambiguity/undefined language is a gap even when it appears under a
+    # broader section such as "Risks and Constraints". This prevents missing
+    # acceptance criteria from being counted as delivery risks.
+    if any(p in s for p in [
+        "not defined", "not stated", "unclear", "not specified", "does not define", "undefined",
+        "no entry/exit", "no numerical target", "not provided", "tbd",
+    ]):
         return "Clarification / Gap", False, "High"
-    if "schedule assumptions" in sec or "assumption" in sec or s.startswith("assume") or "available at least" in s or "expected to be completed" in s:
-        return "Assumption", False, "High"
-    if "not responsible for" in s:
-        return "Contractual Condition", False, "High"
-    if "weekly status report" in s or "reporting" in sec:
-        return "Reporting / Control", False, "Medium"
-    if "dependencies" in sec or (s.startswith("the client will provide") and re.search(r"\bweek\s+\d+\b", s)) or "required by week" in s:
+
+    # Section-first rules keep source meaning intact in plain-text and Markdown SOWs.
+    if "out of scope" in sec or "excluded" in s or "outside the scope" in s:
+        return "Out of Scope", False, "High"
+    if sec in {"major milestones", "milestones"}:
+        return "Milestone", False, "High"
+    if sec == "dependencies":
         return "Dependency", False, "High"
-    if "acceptance" in sec or "definition of done" in sec or "accepted when" in s or "go-live requires" in s:
-        return "Acceptance Criterion", False, "High"
-    if "risks and constraints" in sec or sec == "risks" or s.startswith(("initial known risks", "known risks", "risks include")):
+    if sec in {"assumptions", "schedule assumptions"}:
+        return "Assumption", False, "High"
+    if sec in {"risks", "risks and constraints"}:
         return "Risk / Constraint", False, "High"
-    if "change control" in sec:
-        return "Change Control / Governance", False, "High"
+    if sec in {"acceptance criteria", "definition of done"}:
+        return "Acceptance Criterion", False, "High"
+    if sec in {"clarifications"}:
+        return "Clarification / Gap", False, "High"
+    if sec in {"client responsibilities", "implementation partner responsibilities"}:
+        return "Responsibility", False, "High"
     if sec == "resources":
         return "Resource Definition", False, "Medium"
-    if "major deliverables" in sec:
-        return "Deliverable", False, "High"
-    if "deliverable" in s or ("document" in s and _contains_any(s, ["produce", "provide", "deliver"])):
+    if sec == "reporting":
+        return "Reporting / Control", False, "Medium"
+    if sec == "change control":
+        return "Change Control / Governance", False, "High"
+    if sec in {"governance"}:
+        return "Governance", False, "High"
+    if sec in {"objective", "project objective", "project objectives", "purpose"}:
+        return "Objective / Context", False, "Low"
+    if sec == "commercial assumptions" or re.search(r"\b(?:usd|eur|gbp|inr)\s*[\d,]+", s):
+        return "Commercial", False, "Medium"
+    # Scope/subsection statements can be short but still represent work, e.g.
+    # 'Project kickoff', 'System testing' and 'Business confirmation after deployment'.
+    if sec in {"scope", "in scope"} or sec in _SCOPE_SUBHEADINGS or sec.startswith("workstream "):
+        return "Scope / Work", True, "High"
+
+    if "deliverable" in s:
         return "Deliverable", True, "Medium"
-    if s.startswith("workstream ") or (
-        len(statement) < 90
-        and not re.search(r"\b(?:implement|configure|design|migrate|integrate|test|train|deploy|assess|conduct|create|establish|execute|manage|transition|handover)\b", s)
-    ):
-        return "Reference / Heading", False, "Low"
-    if _contains_any(
-        s,
-        [
-            "implement", "configure", "design", "migrate", "integrate", "test", "train", "deploy",
-            "develop", "build", "conduct", "assess", "establish", "provide", "create", "execute",
-            "standardize", "transition", "handover", "support", "manage", "deliver",
-        ],
-    ):
+    if re.search(r"\b(?:implement|configure|design|migrate|integrate|test|train|deploy|develop|build|conduct|assess|establish|provide|create|execute|manage|support|deliver|prepare|obtain|perform|resolve|complete|document)\b", s):
         return "Scope / Work", True, "High"
     return "Reference / Narrative", False, "Low"
 
@@ -134,12 +196,17 @@ def extract_sow_items(sow_text: str) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     admin_prefixes = (
         "sow reference:", "planned duration:", "target countries:", "target users:",
-        "project type:", "project name:", "planned schedule:",
+        "project type:", "project name:", "planned schedule:", "users:",
     )
     for idx, (section, statement) in enumerate(pairs, 1):
         if statement.lower().startswith(admin_prefixes):
             continue
         item_type, executable, priority = _classify(section, statement)
+        # Objectives are retained in the project summary, but are not counted as
+        # contractual SOW line items. This keeps the SOW register focused on
+        # actionable scope, controls, dependencies, assumptions, risks, criteria and milestones.
+        if item_type == "Objective / Context":
+            continue
         items.append(
             {
                 "sow_id": _stable_id("SOW", statement, idx),
@@ -156,10 +223,62 @@ def extract_sow_items(sow_text: str) -> list[dict[str, Any]]:
     deduped: list[dict[str, Any]] = []
     for row in items:
         key = re.sub(r"[^a-z0-9]+", " ", row["statement"].lower()).strip()
-        if key and key not in seen:
-            seen.add(key)
+        # Do not deduplicate across different sections when the same business
+        # commitment legitimately appears as both scope and milestone/acceptance evidence.
+        scoped_key = f"{row['section']}|{key}"
+        if scoped_key and scoped_key not in seen:
+            seen.add(scoped_key)
             deduped.append(row)
     return deduped
+
+
+def extract_sow_metadata(sow_text: str) -> dict[str, str]:
+    """Extract high-level SOW metadata that should not pollute the SOW item register."""
+    result: dict[str, str] = {"project_name": "", "objective": "", "users": ""}
+    for section, statement in _sentences(sow_text):
+        s = statement.strip()
+        low = s.lower()
+        if low.startswith("project name:"):
+            result["project_name"] = s.split(":", 1)[1].strip()
+        elif low.startswith("users:"):
+            result["users"] = s.split(":", 1)[1].strip()
+        elif section in {"objective", "project objective", "project objectives", "purpose"} and not result["objective"]:
+            result["objective"] = s
+    return result
+
+
+def _source_structure(sow_text: str, items: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return structural QA signals for the extracted SOW register."""
+    section_counts: dict[str, int] = {}
+    for row in items:
+        section = str(row.get("section", "unspecified"))
+        section_counts[section] = section_counts.get(section, 0) + 1
+
+    known_heading_present = False
+    for raw_line in str(sow_text or "").replace("\r", "").split("\n"):
+        clean = _clean_source_line(raw_line)
+        if not clean:
+            continue
+        normalized = re.sub(r"[^a-z0-9]+", " ", clean.rstrip(":").lower()).strip()
+        numbered = re.sub(r"^(?:\d+(?:\.\d+)*|section\s+\d+)\s*[-.):]?\s*", "", normalized).strip()
+        if normalized in _TOP_LEVEL_SECTIONS or numbered in _TOP_LEVEL_SECTIONS or re.match(r"^workstream\s+\d+\b", normalized):
+            known_heading_present = True
+            break
+
+    heading_names = {x for x in _TOP_LEVEL_SECTIONS} | {x for x in _SCOPE_SUBHEADINGS}
+    heading_leakage = 0
+    for row in items:
+        statement_norm = re.sub(r"[^a-z0-9]+", " ", str(row.get("statement", "")).lower()).strip()
+        if statement_norm in heading_names:
+            heading_leakage += 1
+
+    unspecified_count = section_counts.get("unspecified", 0)
+    return {
+        "section_item_counts": section_counts,
+        "known_heading_present": known_heading_present,
+        "heading_leakage_count": heading_leakage,
+        "unspecified_section_item_count": unspecified_count,
+    }
 
 
 def _find(items: list[dict[str, Any]], *terms: str) -> list[dict[str, Any]]:
@@ -365,7 +484,7 @@ def _build_workstream_activities(items: list[dict[str, Any]]) -> tuple[list[dict
     a6 = _add_activity(acts, 3, "Process & Solution Design", "Design future-state processes, workflows and approval rules", _sources(items, "future-state", "workflows", "approval matrices"), [a5])
     a7 = _add_activity(acts, 3, "Process & Solution Design", "Complete solution architecture and technical design", _sources(items, "solution architecture", "technical design", "solution design"), [a5])
     a8 = _add_activity(acts, 4, "Build & Configuration", "Prepare Development, Test, Validation and Production environments", _sources(items, "environments"), [a7])
-    a9 = _add_activity(acts, 4, "Build & Configuration", "Configure platform workflows, rules, roles, permissions and reporting", _sources(items, "configure workflows", "business rules", "roles", "dashboards"), [a6, a8])
+    a9 = _add_activity(acts, 4, "Build & Configuration", "Configure platform workflows, rules, roles, permissions and reporting", _sources(items, "configure", "customer fields", "workflow", "standard reports", "reports", "business rules", "roles", "dashboards"), [a6, a8])
     a10 = _add_activity(acts, 5, "Integration & Data", "Implement ERP and enterprise-system integrations", _sources(items, "erp integration", "erp", "integration"), [a7, a8])
     a11 = _add_activity(acts, 5, "Integration & Data", "Implement identity, SSO and access controls", _sources(items, "sso", "identity", "provisioning"), [a7, a8])
     a12 = _add_activity(acts, 5, "Integration & Data", "Implement document, email and collaboration integrations", _sources(items, "document-management", "email", "collaboration"), [a7, a8])
@@ -374,15 +493,15 @@ def _build_workstream_activities(items: list[dict[str, Any]]) -> tuple[list[dict
     next(a for a in acts if a["activity_id"] == a13b)["duration_days"] = 1
     a14 = _add_activity(acts, 5, "Integration & Data", "Execute trial migration and reconcile results", _sources(items, "trial migration", "reconciliation"), [a13, a13b, a9])
     a15 = _add_activity(acts, 6, "Testing & Acceptance", "Develop test strategy and test plan", _sources(items, "test strategy", "test plan"), [a5])
-    a16 = _add_activity(acts, 6, "Testing & Acceptance", "Execute functional testing and System Integration Testing", _sources(items, "functional testing", "sit"), [a15, a9, a10, a11, a12, a14])
+    a16 = _add_activity(acts, 6, "Testing & Acceptance", "Execute functional testing and System Integration Testing", _sources(items, "system testing", "functional testing", "sit", "user acceptance testing"), [a15, a9, a10, a11, a12, a14])
     a17 = _add_activity(acts, 6, "Testing & Acceptance", "Execute performance and security testing", _sources(items, "performance testing", "security testing"), [a16])
     a18 = _add_activity(acts, 6, "Testing & Acceptance", "Support UAT, defect resolution and retesting", _sources(items, "uat", "defect", "retesting"), [a16, a17])
     a19 = _add_activity(acts, 6, "Testing & Acceptance", "Obtain business acceptance / UAT sign-off", _sources(items, "business acceptance", "go-live requires", "acceptance"), [a18])
-    a20 = _add_activity(acts, 7, "Training & Change", "Develop training materials and change-readiness content", _sources(items, "training materials", "change management"), [a6])
+    a20 = _add_activity(acts, 7, "Training & Change", "Develop training materials and change-readiness content", _sources(items, "training materials", "user guide", "change management"), [a6])
     a21 = _add_activity(acts, 7, "Training & Change", "Deliver end-user, administrator and support training", _sources(items, "train end users", "administrator training", "training"), [a20])
     a22 = _add_activity(acts, 8, "Deployment & Transition", "Complete cutover and deployment readiness assessment", _sources(items, "cutover", "readiness"), [a19, a21, a14])
 
-    has_waves = any("wave 1" in r["statement"].lower() and "wave 2" in r["statement"].lower() for r in items)
+    has_waves = any("wave 1" in r["statement"].lower() for r in items) and any("wave 2" in r["statement"].lower() for r in items)
     if has_waves:
         a23 = _add_activity(acts, 8, "Deployment & Transition", "Wave 1 production deployment", _sources(items, "wave 1"), [a22], milestone=True, milestone_name="Wave 1 Go-Live")
         a24 = _add_activity(acts, 8, "Deployment & Transition", "Wave 2 production deployment", _sources(items, "wave 2"), [a23], milestone=True, milestone_name="Wave 2 Go-Live")
@@ -595,7 +714,7 @@ def _build_quality_records(
         raw = row["statement"].strip()
         if raw.lower().startswith(("initial known risks include", "known risks include", "risks include")):
             tail = re.sub(r"^(?:initial known risks include|known risks include|risks include)\s*", "", raw, flags=re.I).strip(" .")
-            risk_parts = [p.strip(" .") for p in tail.split(",") if p.strip()]
+            risk_parts = [re.sub(r"^(?:and)\s+", "", p.strip(" ."), flags=re.I) for p in tail.split(",") if p.strip()]
         else:
             parts = [re.sub(r"^(?:and)\s+", "", p.strip(" ."), flags=re.I) for p in re.split(r";\s*", raw) if p.strip()]
             risk_parts = parts if len(parts) > 1 else [raw]
@@ -690,6 +809,9 @@ def _phrase_hit(term: str, text: str) -> bool:
 
 _SCHEDULE_ACTIVITY_RULES = {
     "project kickoff": ["project kickoff and charter approval"],
+    "wave 1 go-live": ["wave 1 production deployment"],
+    "wave 2 go-live": ["wave 2 production deployment"],
+    "wave 3 go-live": ["wave 3 production deployment"],
     "discovery complete": ["conduct discovery and current-state assessment"],
     "requirements sign-off": ["validate requirements and obtain requirements sign-off"],
     "requirements approved": ["validate requirements and obtain requirements sign-off"],
@@ -943,6 +1065,13 @@ def _reconcile_plan(plan: dict[str, Any]) -> dict[str, Any]:
     if missing_trace:
         errors.append(f"{len(missing_trace)} SOW item(s) are missing from traceability.")
 
+    source_structure = metadata.get("source_structure", {}) if isinstance(metadata.get("source_structure"), dict) else {}
+    heading_leakage = int(source_structure.get("heading_leakage_count", 0) or 0)
+    unspecified_items = int(source_structure.get("unspecified_section_item_count", 0) or 0)
+    if heading_leakage:
+        errors.append(f"Source extraction emitted {heading_leakage} section heading(s) as SOW items.")
+    if source_structure.get("known_heading_present") and unspecified_items:
+        errors.append(f"Source extraction left {unspecified_items} statement(s) in an unspecified section despite structured headings being present.")
     if not 0 <= coverage <= 100:
         errors.append(f"Traceability coverage is outside 0-100%: {coverage}.")
     if len(schedule_rows) != len(explicit_milestones):
@@ -991,6 +1120,7 @@ def _reconcile_plan(plan: dict[str, Any]) -> dict[str, Any]:
             "planner_version": PLANNER_VERSION,
             "engine_version": metadata.get("engine_version") or PLANNER_VERSION,
             "sow_item_count": len(items),
+            "source_item_type_counts": {k: sum(1 for i in items if i.get("type") == k) for k in sorted({str(i.get("type")) for i in items})},
             "executable_sow_item_count": exec_count,
             "activity_count": len(activities),
             "sow_backed_activity_count": sow_backed_activities,
@@ -1030,7 +1160,9 @@ def _reconcile_plan(plan: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_deterministic_plan(sow_text: str, project_name: str) -> dict[str, Any]:
+    source_metadata = extract_sow_metadata(sow_text)
     items = extract_sow_items(sow_text)
+    source_structure = _source_structure(sow_text, items)
     activities, wbs = _build_workstream_activities(items)
     milestones = _proposed_milestones(_parse_explicit_milestones(items), activities, items)
     trace, gaps, risks, assumptions, constraints = _build_quality_records(items, activities)
@@ -1053,6 +1185,7 @@ def build_deterministic_plan(sow_text: str, project_name: str) -> dict[str, Any]
     plan = {
         "summary": {
             "project_name": project_name,
+            "objective": source_metadata.get("objective", ""),
             "project_type": project_type,
             "description": (
                 f"The SOW has been converted into a structured project plan covering {len(wbs)} workstreams "
@@ -1076,6 +1209,7 @@ def build_deterministic_plan(sow_text: str, project_name: str) -> dict[str, Any]
             "engine_version": PLANNER_VERSION,
             "source_characters": len(sow_text),
             "sow_duration": sow_duration,
+            "source_structure": source_structure,
         },
     }
     return _reconcile_plan(plan)

@@ -6,7 +6,7 @@ import re
 from copy import deepcopy
 from typing import Any
 
-PLANNER_VERSION = "v8.0"
+PLANNER_VERSION = "v9.0"
 
 
 def _stable_id(prefix: str, text: str, index: int = 0) -> str:
@@ -1171,7 +1171,7 @@ def _is_ai_row(row: dict[str, Any], kind: str) -> bool:
 
 
 def _gap_counts(gaps: list[dict[str, Any]]) -> dict[str, int]:
-    schedule = sum(1 for g in gaps if str(g.get("category", "")).strip().lower() == "schedule fit")
+    schedule = sum(1 for g in gaps if str(g.get("category", "")).strip().lower() in {"schedule fit", "schedule adjustment"})
     ai = sum(
         1
         for g in gaps
@@ -1196,7 +1196,7 @@ def _gap_counts(gaps: list[dict[str, Any]]) -> dict[str, int]:
     }
 
 
-def _add_schedule_findings_to_gap_register(gaps: list[dict[str, Any]], schedule_rows: list[dict[str, Any]]) -> None:
+def _add_schedule_findings_to_gap_register(gaps: list[dict[str, Any]], schedule_rows: list[dict[str, Any]], activities: list[dict[str, Any]]) -> None:
     existing = {str(g.get("description", "")).strip().lower() for g in gaps}
     for row in schedule_rows:
         if row.get("Status") != "Review":
@@ -1209,7 +1209,7 @@ def _add_schedule_findings_to_gap_register(gaps: list[dict[str, Any]], schedule_
             continue
         gaps.append(
             {
-                "gap_id": f"GAP-SCH-{sum(1 for g in gaps if str(g.get('category', '')).lower() == 'schedule fit') + 1:03d}",
+                "gap_id": f"GAP-SCH-{sum(1 for g in gaps if str(g.get('category', '')).lower() in {'schedule fit', 'schedule adjustment'}) + 1:03d}",
                 "category": "Schedule Fit",
                 "description": description,
                 "severity": "High",
@@ -1219,6 +1219,29 @@ def _add_schedule_findings_to_gap_register(gaps: list[dict[str, Any]], schedule_
                 "origin": "Schedule",
             }
         )
+
+    # Make advisory duration compression visible instead of silently hiding it behind
+    # a zero milestone-variance result. These are planning findings, not SOW gaps.
+    for activity in activities:
+        adjustment = str(activity.get("schedule_adjustment", "")).strip()
+        if not adjustment:
+            continue
+        description = f"{activity.get('activity_name')} requires a planning-duration adjustment: {adjustment}"
+        if description.lower() in existing:
+            continue
+        gaps.append(
+            {
+                "gap_id": f"GAP-SCH-ADJ-{sum(1 for g in gaps if str(g.get('category', '')).lower() == 'schedule adjustment') + 1:03d}",
+                "category": "Schedule Adjustment",
+                "description": description,
+                "severity": "Review",
+                "recommendation": "PM to confirm the duration, parallelization and resource assumptions before baseline; do not treat the contractual milestone as changed.",
+                "source_sow_ids": [],
+                "source_milestone_id": None,
+                "origin": "Schedule",
+            }
+        )
+        existing.add(description.lower())
 
 
 def _register_ids(plan: dict[str, Any]) -> dict[str, list[str]]:
@@ -1244,11 +1267,14 @@ def _reconcile_plan(plan: dict[str, Any]) -> dict[str, Any]:
     risks = out.get("risks", []) or []
     assumptions = out.get("assumptions", []) or []
     constraints = out.get("constraints", []) or []
+    ai_advisory_gaps = out.get("ai_advisory_gaps", []) or []
+    ai_advisory_risks = out.get("ai_advisory_risks", []) or []
+    ai_advisory_assumptions = out.get("ai_advisory_assumptions", []) or []
     metadata = out.setdefault("metadata", {})
 
     # Rebuild the schedule after every mutation (including AI merge) from the same logic.
     schedule_rows = build_schedule_review(milestones, activities)
-    _add_schedule_findings_to_gap_register(gaps, schedule_rows)
+    _add_schedule_findings_to_gap_register(gaps, schedule_rows, activities)
     out["gaps"] = gaps
 
     # Milestone trace links are derived from the actual milestone register.
@@ -1280,8 +1306,9 @@ def _reconcile_plan(plan: dict[str, Any]) -> dict[str, Any]:
 
     planned_finish = max((int(a.get("finish_week") or 0) for a in activities), default=0)
     gap_counts = _gap_counts(gaps)
-    ai_risks = sum(1 for r in risks if _is_ai_row(r, "risk"))
-    ai_assumptions = sum(1 for a in assumptions if _is_ai_row(a, "assumption"))
+    ai_risks = len(ai_advisory_risks)
+    ai_assumptions = len(ai_advisory_assumptions)
+    ai_gap_count = len(ai_advisory_gaps)
     sow_backed_activities = sum(1 for a in activities if a.get("source_sow_ids"))
 
     errors: list[str] = []
@@ -1379,15 +1406,19 @@ def _reconcile_plan(plan: dict[str, Any]) -> dict[str, Any]:
             "gap_register_count": gap_counts["register_total"],
             "scope_or_review_gap_count": gap_counts["scope_or_review_gaps"],
             "sow_gap_count": gap_counts["sow_gaps"],
-            "ai_review_gap_count": gap_counts["ai_review_gaps"],
+            "ai_review_gap_count": ai_gap_count,
             "schedule_finding_count": gap_counts["schedule_findings"],
+            "schedule_adjustment_count": sum(1 for a in activities if str(a.get("schedule_adjustment", "")).strip()),
             "high_severity_sow_gap_count": gap_counts["high_severity_sow_gaps"],
             "risk_register_count": len(risks),
-            "sow_risk_count": len(risks) - ai_risks,
+            "sow_risk_count": len(risks),
             "ai_review_risk_count": ai_risks,
             "assumption_register_count": len(assumptions),
-            "sow_assumption_count": len(assumptions) - ai_assumptions,
+            "sow_assumption_count": len(assumptions),
             "ai_review_assumption_count": ai_assumptions,
+            "ai_advisory_gap_count": ai_gap_count,
+            "ai_advisory_risk_count": ai_risks,
+            "ai_advisory_assumption_count": ai_assumptions,
             "constraint_register_count": len(constraints),
             "schedule_review_rows": schedule_rows,
             "schedule_status_counts": status_counts,
@@ -1446,6 +1477,9 @@ def build_deterministic_plan(sow_text: str, project_name: str) -> dict[str, Any]
         "gaps": gaps,
         "risks": risks,
         "traceability": trace,
+        "ai_advisory_gaps": [],
+        "ai_advisory_risks": [],
+        "ai_advisory_assumptions": [],
         "metadata": {
             "engine": "deterministic",
             "engine_version": PLANNER_VERSION,
@@ -1457,67 +1491,144 @@ def build_deterministic_plan(sow_text: str, project_name: str) -> dict[str, Any]
     return _reconcile_plan(plan)
 
 
+def _advisory_tokens(text: str) -> set[str]:
+    stop = {
+        "the", "a", "an", "and", "or", "of", "to", "for", "in", "on", "by", "with", "from",
+        "is", "are", "be", "before", "after", "during", "this", "that", "not", "no", "defined",
+        "define", "defined", "undefined", "unspecified", "unknown", "specific", "details", "criteria",
+        "target", "targets", "requirement", "requirements", "issues", "issue", "client", "project", "pm",
+        "review", "validate", "validation", "needed", "need", "will", "may", "should", "must", "include",
+        "included", "actual", "current", "source", "provide", "providing", "provided", "available", "availability",
+        "week", "weeks", "calendar", "business", "days",
+    }
+    raw = re.findall(r"[a-z0-9]+", _norm(text).lower())
+    return {x for x in raw if x not in stop and len(x) > 2}
+
+
+def _advisory_overlap(candidate: str, existing: str, *, kind: str) -> float:
+    a = _advisory_tokens(candidate)
+    b = _advisory_tokens(existing)
+    if not a or not b:
+        return 0.0
+    jaccard = len(a & b) / max(1, len(a | b))
+    containment = max(len(a & b) / len(a), len(a & b) / len(b))
+    score = max(jaccard, containment * 0.8)
+
+    # Controlled domain concepts catch paraphrases where simple token overlap is low.
+    clusters = [
+        {"erp", "api", "spec", "specs", "credential", "credentials", "interface", "integration"},
+        {"data", "migration", "historical", "legacy", "quality", "cleansing", "reconciliation", "records", "record"},
+        {"local", "variation", "variations", "process", "processes", "scope", "threshold", "15"},
+        {"performance", "response", "response-time", "numerical", "target"},
+        {"security", "penetration", "testing", "test"},
+        {"uat", "acceptance", "sign-off", "signoff", "defect"},
+    ]
+    for cluster in clusters:
+        if len(a & cluster) >= 2 and len(b & cluster) >= 1:
+            score = max(score, 0.65)
+    return min(score, 1.0)
+
+
+def _ai_gap_is_unsupported(text: str, base_plan: dict[str, Any]) -> tuple[bool, str]:
+    lower = _norm(text).lower()
+    milestones = base_plan.get("milestones", []) or []
+    explicit_milestones = [m for m in milestones if m.get("source") == "Explicit SOW milestone"]
+    explicit_weeks = [_target_week(m.get("target")) for m in explicit_milestones]
+    explicit_weeks = [w for w in explicit_weeks if w is not None]
+    if ("no defined timeline" in lower or "no defined milestones" in lower or "no timeline or milestones" in lower) and explicit_weeks:
+        return True, "Contradicted by explicit SOW milestones."
+
+    sow_items = base_plan.get("sow_items", []) or []
+    item_types = {str(i.get("type", "")).strip().lower() for i in sow_items}
+    if "acceptance criterion" in item_types and ("success criteria" in lower or "acceptance criteria" in lower or "acceptance thresholds" in lower):
+        return True, "Acceptance criteria are explicitly present in the SOW."
+
+    sow_gaps = [g for g in base_plan.get("gaps", []) or [] if not _is_ai_row(g, "gap")]
+    for gap in sow_gaps:
+        if _advisory_overlap(text, str(gap.get("description", "")), kind="gap") >= 0.62:
+            return True, f"Duplicates existing SOW gap {gap.get('gap_id', '')}."
+    return False, ""
+
+
+def _filter_ai_risk(text: str, base_plan: dict[str, Any]) -> tuple[bool, str]:
+    for risk in base_plan.get("risks", []) or []:
+        if _is_ai_row(risk, "risk"):
+            continue
+        if _advisory_overlap(text, str(risk.get("risk", "")), kind="risk") >= 0.60:
+            return True, f"Duplicates existing SOW risk {risk.get('risk_id', '')}."
+    return False, ""
+
+
+def _build_ai_advisory_row(kind: str, idx: int, text: str) -> dict[str, Any]:
+    if kind == "gap":
+        return {
+            "gap_id": f"AI-GAP-{idx:03d}", "category": "AI Review", "description": text,
+            "severity": "Review", "recommendation": "PM to validate the clarification before baseline.",
+            "source_sow_ids": [], "origin": "AI",
+        }
+    if kind == "risk":
+        return {
+            "risk_id": f"AI-RISK-{idx:03d}", "risk": text, "impact": "Medium", "probability": "Medium",
+            "mitigation": "PM to validate, assign owner and define response.", "source_sow_ids": [], "origin": "AI",
+        }
+    return {
+        "assumption_id": f"AI-ASM-{idx:03d}", "assumption": text, "basis": "AI planning recommendation",
+        "status": "To Validate", "source_sow_ids": [], "origin": "AI",
+    }
+
+
 def merge_ai_advice(base_plan: dict[str, Any], ai: dict[str, Any] | None) -> dict[str, Any]:
     if not ai:
         return _reconcile_plan(base_plan)
     result = deepcopy(base_plan)
-    summary = result.setdefault("summary", {})
-    # AI advice is advisory data only. It must not author the application's
-    # user-facing summary, project type, or confidence message. Those values
-    # remain deterministic and PMO-controlled.
+    # AI recommendations are kept in separate advisory registers. They never inflate
+    # contractual SOW risk/assumption/gap counts, and unsupported/duplicate advice is rejected.
+    result.setdefault("ai_advisory_gaps", [])
+    result.setdefault("ai_advisory_risks", [])
+    result.setdefault("ai_advisory_assumptions", [])
+    metadata = result.setdefault("metadata", {})
+    rejections = []
 
-    existing_gap_text = {g.get("description", "").lower() for g in result.get("gaps", [])}
-    existing_risk_text = {r.get("risk", "").lower() for r in result.get("risks", [])}
-    existing_assumption_text = {a.get("assumption", "").lower() for a in result.get("assumptions", [])}
+    existing_advisory_gap_text = {str(g.get("description", "")).lower() for g in result.get("ai_advisory_gaps", [])}
+    accepted_idx = len(result["ai_advisory_gaps"])
+    for raw in ai.get("gaps", [])[:5]:
+        text = _norm(raw)
+        if not text or text.lower() in existing_advisory_gap_text:
+            continue
+        reject, reason = _ai_gap_is_unsupported(text, result)
+        if reject:
+            rejections.append({"type": "gap", "text": text, "reason": reason})
+            continue
+        accepted_idx += 1
+        result["ai_advisory_gaps"].append(_build_ai_advisory_row("gap", accepted_idx, text))
+        existing_advisory_gap_text.add(text.lower())
 
-    for idx, g in enumerate(ai.get("gaps", [])[:3], 1):
-        text = _norm(g)
-        if text and text.lower() not in existing_gap_text:
-            result["gaps"].append(
-                {
-                    "gap_id": f"AI-GAP-{idx:03d}",
-                    "category": "AI Review",
-                    "description": text,
-                    "severity": "Review",
-                    "recommendation": "PM to validate the clarification before baseline.",
-                    "source_sow_ids": [],
-                    "origin": "AI",
-                }
-            )
-            existing_gap_text.add(text.lower())
+    existing_advisory_risk_text = {str(r.get("risk", "")).lower() for r in result.get("ai_advisory_risks", [])}
+    accepted_idx = len(result["ai_advisory_risks"])
+    for raw in ai.get("risks", [])[:5]:
+        text = _norm(raw)
+        if not text or text.lower() in existing_advisory_risk_text:
+            continue
+        reject, reason = _filter_ai_risk(text, result)
+        if reject:
+            rejections.append({"type": "risk", "text": text, "reason": reason})
+            continue
+        accepted_idx += 1
+        result["ai_advisory_risks"].append(_build_ai_advisory_row("risk", accepted_idx, text))
+        existing_advisory_risk_text.add(text.lower())
 
-    for idx, r in enumerate(ai.get("risks", [])[:3], 1):
-        text = _norm(r)
-        if text and text.lower() not in existing_risk_text:
-            result["risks"].append(
-                {
-                    "risk_id": f"AI-RISK-{idx:03d}",
-                    "risk": text,
-                    "impact": "Medium",
-                    "probability": "Medium",
-                    "mitigation": "PM to validate, assign owner and define response.",
-                    "source_sow_ids": [],
-                    "origin": "AI",
-                }
-            )
-            existing_risk_text.add(text.lower())
+    existing_advisory_assumption_text = {str(a.get("assumption", "")).lower() for a in result.get("ai_advisory_assumptions", [])}
+    accepted_idx = len(result["ai_advisory_assumptions"])
+    for raw in ai.get("assumptions", [])[:5]:
+        text = _norm(raw)
+        if not text or text.lower() in existing_advisory_assumption_text:
+            continue
+        accepted_idx += 1
+        result["ai_advisory_assumptions"].append(_build_ai_advisory_row("assumption", accepted_idx, text))
+        existing_advisory_assumption_text.add(text.lower())
 
-    for idx, a in enumerate(ai.get("assumptions", [])[:3], 1):
-        text = _norm(a)
-        if text and text.lower() not in existing_assumption_text:
-            result["assumptions"].append(
-                {
-                    "assumption_id": f"AI-ASM-{idx:03d}",
-                    "assumption": text,
-                    "basis": "AI planning recommendation",
-                    "status": "To Validate",
-                    "source_sow_ids": [],
-                    "origin": "AI",
-                }
-            )
-            existing_assumption_text.add(text.lower())
-
-    result.setdefault("metadata", {})["ai_seed_used"] = True
+    metadata["ai_seed_used"] = True
+    metadata["ai_advisory_rejections"] = rejections
     return _reconcile_plan(result)
 
 
@@ -1526,7 +1637,7 @@ def validate_and_normalize_plan(plan: dict[str, Any]) -> dict[str, Any]:
         return build_deterministic_plan("", "Project")
     keys = [
         "summary", "scope", "sow_items", "wbs", "activities", "milestones",
-        "assumptions", "constraints", "gaps", "risks", "traceability", "metadata",
+        "assumptions", "constraints", "gaps", "risks", "traceability", "metadata", "ai_advisory_gaps", "ai_advisory_risks", "ai_advisory_assumptions",
     ]
     out = {k: deepcopy(plan.get(k)) for k in keys}
     for k in keys:

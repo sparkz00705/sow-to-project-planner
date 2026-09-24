@@ -393,6 +393,9 @@ def _leadership_metrics(plan: dict) -> dict[str, object]:
     risk_count = int(meta.get("risk_register_count", len(plan.get("risks", []))) or 0)
     assumption_count = int(meta.get("assumption_register_count", len(plan.get("assumptions", []))) or 0)
     constraint_count = int(meta.get("constraint_register_count", len(plan.get("constraints", []))) or 0)
+    ai_risk_count = int(meta.get("ai_advisory_risk_count", 0) or 0)
+    ai_assumption_count = int(meta.get("ai_advisory_assumption_count", 0) or 0)
+    ai_advisory_gap_count = int(meta.get("ai_advisory_gap_count", 0) or 0)
     coverage = float(meta.get("traceability_coverage_percent", 0) or 0)
     planned_finish = meta.get("planned_finish_week")
     sow_duration = meta.get("sow_duration_week")
@@ -407,7 +410,10 @@ def _leadership_metrics(plan: dict) -> dict[str, object]:
         "schedule_findings": schedule_finding_count,
         "high_gaps": high_gap_count,
         "risks": risk_count,
+        "ai_risks": ai_risk_count,
         "assumptions": assumption_count,
+        "ai_assumptions": ai_assumption_count,
+        "ai_advisory_gaps": ai_advisory_gap_count,
         "constraints": constraint_count,
         "coverage": coverage,
         "planned_finish_week": int(planned_finish) if planned_finish not in (None, "") else None,
@@ -617,6 +623,7 @@ def _leader_status(
     gap_breakdown = _register_breakdown(gaps, "gap")
     risk_breakdown = _register_breakdown(risks, "risk")
     high_gaps = _high_gap_count(gaps)
+    schedule_adjustments = sum(1 for g in gaps if str(g.get("category", "")).strip().lower() == "schedule adjustment")
     finish_variance = (
         planned_finish_week - sow_duration_week
         if planned_finish_week is not None and sow_duration_week is not None
@@ -627,8 +634,10 @@ def _leader_status(
         f"{reviews} schedule exception(s)",
         f"{unmapped} unmapped milestone(s)",
         f"{high_gaps} high-severity SOW gap(s) of {gap_breakdown['sow_or_plan']} SOW/plan gap(s) identified",
-        f"{risk_breakdown['total']} risk(s) identified",
+        f"{risk_breakdown['total']} SOW risk(s) identified",
     ]
+    if schedule_adjustments:
+        details.append(f"{schedule_adjustments} planning-duration adjustment(s) require PM review")
     if finish_variance is not None and finish_variance > 0:
         details.append(
             f"dependency-driven finish is {finish_variance} week(s) beyond the {sow_duration_week}-week SOW duration"
@@ -638,11 +647,11 @@ def _leader_status(
             f"dependency-driven finish is {abs(finish_variance)} week(s) earlier than the {sow_duration_week}-week SOW duration target"
         )
 
-    if reviews or unmapped or high_gaps or risk_breakdown["total"] or (finish_variance or 0) > 0:
-        return "PM review required", ", ".join(details) + "."
+    if reviews or unmapped or high_gaps or schedule_adjustments or (finish_variance or 0) > 0:
+        return "PM REVIEW REQUIRED", "Review the highlighted gaps and planning adjustments before baseline."
     if coverage >= 100:
-        return "Ready for PM review", "Executable traceability is complete and no schedule exception is currently surfaced."
-    return "PM review required", f"Executable traceability coverage is {coverage:g}%; review uncovered scope before baseline."
+        return "READY FOR PM REVIEW", "All executable SOW items are traceable and no milestone exception is currently surfaced."
+    return "PM REVIEW REQUIRED", f"Executable traceability is {coverage:g}%; review the remaining scope before baseline."
 
 
 def show_plan(plan: dict) -> None:
@@ -655,6 +664,9 @@ def show_plan(plan: dict) -> None:
     risks = plan.get("risks", []) or []
     assumptions = plan.get("assumptions", []) or []
     constraints = plan.get("constraints", []) or []
+    ai_advisory_gaps = plan.get("ai_advisory_gaps", []) or []
+    ai_advisory_risks = plan.get("ai_advisory_risks", []) or []
+    ai_advisory_assumptions = plan.get("ai_advisory_assumptions", []) or []
     wbs = plan.get("wbs", []) or []
     metadata = plan.get("metadata", {}) or {}
 
@@ -695,10 +707,40 @@ def show_plan(plan: dict) -> None:
         sow_duration_week,
         planned_finish_week,
     )
-    st.info(
-        f"**Plan status: {leader_status}** · {leader_detail} "
-        "This is a decision-support view; PM / sponsor approval is still required before baseline."
+
+    schedule_adjustments = sum(
+        1
+        for item in gaps
+        if str(item.get("category", "")).strip().lower() == "schedule adjustment"
     )
+
+    # Leadership-facing status panel: decision-oriented, human-readable, and
+    # intentionally separated from internal engine/provider terminology.
+    with st.container(border=True):
+        st.markdown(f"### {leader_status}")
+        st.write(leader_detail)
+        st.caption("PM / sponsor approval is required before the plan is baselined.")
+
+        s1, s2, s3, s4 = st.columns(4)
+        schedule_label = f"{review_count} exception{'s' if review_count != 1 else ''}"
+        s1.metric("Schedule", schedule_label)
+        s1.caption(
+            f"{schedule_adjustments} planning adjustment{'s' if schedule_adjustments != 1 else ''} require review."
+            if schedule_adjustments
+            else "No planning adjustments surfaced."
+        )
+        mapped_milestones = leadership["sow_milestones"] - unmapped_count
+        s2.metric(
+            "Milestones",
+            f"{mapped_milestones} / {leadership['sow_milestones']} mapped",
+        )
+        s2.caption(
+            "All SOW milestones mapped." if not unmapped_count else f"{unmapped_count} milestone(s) need mapping review."
+        )
+        s3.metric("High-severity gaps", high_gaps)
+        s3.caption(f"of {leadership['gaps']} SOW/plan gaps")
+        s4.metric("SOW risks", leadership["risks"])
+        s4.caption("Contractual SOW risks; AI advisory risks are separate.")
 
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("SOW items", leadership["sow_items"])
@@ -720,13 +762,9 @@ def show_plan(plan: dict) -> None:
     )
 
     st.caption(
-        f"Gap reconciliation: {leadership['gaps']} SOW/plan gaps + {leadership['ai_gaps']} AI review gaps + {leadership['schedule_findings']} schedule findings = {leadership['gap_register_total']} total gap-register rows. "
-        f"{len(risks)} risks ({risk_breakdown['sow_or_plan']} SOW/plan + {risk_breakdown['ai']} AI), "
-        f"{len(assumptions)} assumptions ({assumption_breakdown['sow_or_plan']} SOW + {assumption_breakdown['ai']} AI)."
-    )
-    st.caption(
-        "Leadership metrics distinguish SOW-derived findings, AI planning recommendations, and schedule-fit findings. "
-        "AI recommendations are advisory and do not change contractual SOW commitments."
+        f"Current plan: {leadership['gaps']} SOW/plan gap(s) · {leadership['schedule_findings']} schedule finding(s) · "
+        f"{leadership['risks']} SOW risk(s) · {leadership['assumptions']} SOW assumption(s). "
+        "AI observations are advisory and do not change SOW commitments."
     )
     st.caption(
         "SOW item count includes substantive source statements. Section headings and administrative metadata are excluded from the SOW item register."
@@ -754,7 +792,7 @@ def show_plan(plan: dict) -> None:
     if recon_errors:
         st.error("Leadership reconciliation: ERROR — the generated plan contains internal consistency defects and must not be baselined or exported. " + " ".join(str(x) for x in recon_errors[:5]))
     else:
-        st.success("Leadership reconciliation: PASS — headline counts, traceability, dependencies and schedule status totals reconcile to the generated registers.")
+        st.success("Plan data check: Complete — the project registers are internally consistent across scope, activities, milestones, traceability, dependencies, and schedule findings.")
     if recon_warnings:
         st.caption(f"Reconciliation warnings: {len(recon_warnings)} informational item(s).")
 
@@ -787,7 +825,7 @@ def show_plan(plan: dict) -> None:
         f"{f'Week {sow_duration_week}' if sow_duration_week is not None else '—'} · "
         f"Dependency-driven finish: {f'Week {planned_finish_week}' if planned_finish_week is not None else '—'}"
         + (f" · Planning variance: +{finish_variance} week(s)" if finish_variance and finish_variance > 0 else "")
-        + f" · Project type: {summary.get('project_type', 'Unknown')} · Planning confidence: {summary.get('confidence', 'N/A')} · Planning engine: {metadata.get('engine', 'Unknown')}"
+        + f" · Project type: {summary.get('project_type', 'Unknown')} · Planning confidence: {summary.get('confidence', 'N/A')}"
     )
     st.caption(
         "Coverage represents executable SOW items mapped to planning activities. "
@@ -997,13 +1035,18 @@ def show_plan(plan: dict) -> None:
             )
             with st.expander("View extracted gap detail"):
                 st.dataframe(gdf, use_container_width=True, hide_index=True, key="gaps_detail_table")
+        if ai_advisory_gaps:
+            st.markdown("#### AI advisory gaps")
+            st.dataframe(pd.DataFrame(ai_advisory_gaps), use_container_width=True, hide_index=True, key="ai_advisory_gaps_table")
 
     with tabs[6]:
         rdf = pd.DataFrame(risks)
         if rdf.empty:
             st.success("No planning risks were identified.")
         else:
-            st.metric("Risks identified", len(rdf))
+            st.metric("SOW risks identified", leadership["risks"])
+            if ai_advisory_risks:
+                st.caption(f"AI advisory risk observations: {len(ai_advisory_risks)}. These are not counted as additional SOW risks and are shown separately below.")
             st.dataframe(
                 pd.DataFrame(_management_rows(risks, "risk")),
                 use_container_width=True,
@@ -1012,10 +1055,14 @@ def show_plan(plan: dict) -> None:
             )
             with st.expander("View extracted risk detail"):
                 st.dataframe(rdf, use_container_width=True, hide_index=True, key="risks_detail_table")
+        if ai_advisory_risks:
+            st.markdown("#### AI advisory risk observations")
+            st.dataframe(pd.DataFrame(ai_advisory_risks), use_container_width=True, hide_index=True, key="ai_advisory_risks_table")
 
     with tabs[7]:
         adf = pd.DataFrame(assumptions)
         if not adf.empty:
+            st.caption(f"SOW assumptions: {leadership["assumptions"]}. AI advisory assumptions are shown separately and are not treated as contractual SOW assumptions.")
             st.dataframe(
                 adf,
                 use_container_width=True,
@@ -1024,6 +1071,9 @@ def show_plan(plan: dict) -> None:
             )
         else:
             st.info("No explicit assumptions were extracted.")
+        if ai_advisory_assumptions:
+            st.markdown("#### AI advisory assumptions")
+            st.dataframe(pd.DataFrame(ai_advisory_assumptions), use_container_width=True, hide_index=True, key="ai_advisory_assumptions_table")
         cdf = pd.DataFrame(constraints)
         if not cdf.empty:
             st.markdown("#### Constraints")
@@ -1196,7 +1246,7 @@ def main() -> None:
                     plan = merge_ai_advice(plan, ai_advice)
                     plan["metadata"]["engine"] = "groq_qwen38_hybrid"
                     plan["metadata"]["engine_version"] = (
-                        "planner-v8 + groq-qwen38-advice"
+                        "planner-v9 + groq-qwen38-advice"
                     )
                     engine = "Groq AI planner + planning engine"
                 except Exception as exc:
@@ -1227,7 +1277,7 @@ def main() -> None:
                 timezone.utc
             ).isoformat()
 
-        st.success(f"Project plan generated for PM review. {engine}")
+        st.success("Project plan prepared for PM review.")
 
     # IMPORTANT: render the project plan exactly once per Streamlit run.
     # The previous version rendered show_plan() both before and after generation,

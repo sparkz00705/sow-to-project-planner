@@ -9,7 +9,7 @@ import requests
 import streamlit as st
 
 from ai import generate_ai_advice, get_groq_config
-from db import create_project, init_db, list_projects, load_project
+from db import create_project, init_db
 from exporter import build_excel_workbook
 from extract import extract_document
 from planner import build_deterministic_plan, merge_ai_advice, validate_and_normalize_plan
@@ -204,22 +204,8 @@ def main() -> None:
         base_url=get_secret("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
     )
 
-    projects = list_projects(db)
     with st.sidebar:
-        st.markdown("**Saved projects**")
-        if projects:
-            choice = st.selectbox("Open project", ["—"] + [p["label"] for p in projects], label_visibility="collapsed")
-            if choice != "—":
-                selected = next(p for p in projects if p["label"] == choice)
-                loaded = load_project(db, selected["id"])
-                if loaded:
-                    st.session_state["plan"] = loaded["plan"]
-                    st.session_state["project_name"] = loaded["name"]
-                    st.success("Project loaded.")
-        else:
-            st.caption("No saved projects yet.")
-
-        st.markdown("---")
+        st.markdown("### Test / Sample")
         if st.button("🧪 Load Complex Sample SOW", use_container_width=True):
             st.session_state["project_name"] = "Enterprise Digital Operations Platform"
             st.session_state["sow_text"] = COMPLEX_SAMPLE_SOW

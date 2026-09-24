@@ -975,6 +975,16 @@ def _reconcile_plan(plan: dict[str, Any]) -> dict[str, Any]:
             if r.get("source_sow_ids"):
                 warnings.append(f"AI {collection_name} row {r.get(kind + '_id')} has source SOW IDs; treated as AI by explicit marker.")
 
+    # Confidence is a deterministic planning-quality indicator, not an AI opinion.
+    if errors:
+        deterministic_confidence = "Low"
+    elif coverage >= 90 and status_counts.get("Unmapped", 0) == 0:
+        deterministic_confidence = "High"
+    else:
+        deterministic_confidence = "Medium"
+
+    out.setdefault("summary", {})["confidence"] = deterministic_confidence
+
     metadata.update(
         {
             "engine": metadata.get("engine", "deterministic"),
@@ -1044,7 +1054,11 @@ def build_deterministic_plan(sow_text: str, project_name: str) -> dict[str, Any]
         "summary": {
             "project_name": project_name,
             "project_type": project_type,
-            "description": f"Executable work extracted from the SOW and organized into {len(wbs)} workstreams with PM-reviewable durations, dependencies and traceability.",
+            "description": (
+                f"The SOW has been converted into a structured project plan covering {len(wbs)} workstreams "
+                f"and {len(activities)} planned activities. Explicit SOW milestones, dependencies, risks, gaps "
+                "and traceability are retained for PM review; contractual commitments are not changed by the tool."
+            ),
             "confidence": "Medium",
         },
         "scope": {"in_scope": [r["statement"] for r in items if r["type"] in {"Scope / Work", "Deliverable"}], "out_of_scope": [r["statement"] for r in items if r["type"] == "Out of Scope"]},
@@ -1072,12 +1086,9 @@ def merge_ai_advice(base_plan: dict[str, Any], ai: dict[str, Any] | None) -> dic
         return _reconcile_plan(base_plan)
     result = deepcopy(base_plan)
     summary = result.setdefault("summary", {})
-    if ai.get("project_type"):
-        summary["project_type"] = _norm(ai["project_type"])[:100]
-    if ai.get("summary"):
-        summary["description"] = _norm(ai["summary"])[:500]
-    if ai.get("confidence"):
-        summary["confidence"] = str(ai["confidence"])
+    # AI advice is advisory data only. It must not author the application's
+    # user-facing summary, project type, or confidence message. Those values
+    # remain deterministic and PMO-controlled.
 
     existing_gap_text = {g.get("description", "").lower() for g in result.get("gaps", [])}
     existing_risk_text = {r.get("risk", "").lower() for r in result.get("risks", [])}

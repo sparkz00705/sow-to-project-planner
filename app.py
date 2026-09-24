@@ -560,14 +560,15 @@ def _management_rows(rows: list[dict], kind: str) -> list[dict]:
 
 
 def _decision_rows(schedule_rows: list[dict], gaps: list[dict], risks: list[dict]) -> list[dict]:
+    """Build a complete PM/sponsor attention register without silently truncating findings."""
     rows: list[dict] = []
     for row in schedule_rows:
         if row.get("Status") in {"Review", "Watch"}:
             variance = row.get("Variance (weeks)", 0)
             action = (
-                "Re-sequence dependencies or obtain an approved milestone exception."
+                "Re-sequence the affected dependencies or raise a formal milestone exception for approval."
                 if row.get("Status") == "Review"
-                else "Confirm dependency dates and monitor before baseline."
+                else "Confirm the dependency dates and monitor the milestone before baseline."
             )
             rows.append(
                 {
@@ -578,7 +579,7 @@ def _decision_rows(schedule_rows: list[dict], gaps: list[dict], risks: list[dict
                 }
             )
 
-    for item in _management_rows(gaps, "gap")[:4]:
+    for item in _management_rows(gaps, "gap"):
         rows.append(
             {
                 "Decision area": "Gap",
@@ -588,7 +589,7 @@ def _decision_rows(schedule_rows: list[dict], gaps: list[dict], risks: list[dict
             }
         )
 
-    for item in _management_rows(risks, "risk")[:4]:
+    for item in _management_rows(risks, "risk"):
         rows.append(
             {
                 "Decision area": "Risk",
@@ -597,7 +598,7 @@ def _decision_rows(schedule_rows: list[dict], gaps: list[dict], risks: list[dict
                 "PM action": item["PM action"],
             }
         )
-    return rows[:10]
+    return rows
 
 
 def _leader_status(
@@ -655,6 +656,9 @@ def show_plan(plan: dict) -> None:
     metadata = plan.get("metadata", {}) or {}
 
     st.subheader("Leadership & PM Review")
+
+    # All application messages and explanations are written in fixed PMO language.
+    # AI may contribute advisory register data, but it does not author user-facing prose.
 
     # Leadership metrics are deliberately split between SOW/deterministic data
     # and AI-added review suggestions. This prevents AI additions from looking
@@ -718,7 +722,8 @@ def show_plan(plan: dict) -> None:
         f"{len(assumptions)} assumptions ({assumption_breakdown['sow_or_plan']} SOW + {assumption_breakdown['ai']} AI)."
     )
     st.caption(
-        "Leadership cards separate scope/clarification gaps from schedule findings. AI rows are planning advice, not contractual SOW commitments."
+        "Leadership metrics distinguish SOW-derived findings, AI planning recommendations, and schedule-fit findings. "
+        "AI recommendations are advisory and do not change contractual SOW commitments."
     )
 
     recon_errors = list(metadata.get("reconciliation_errors", []) or [])
@@ -761,7 +766,10 @@ def show_plan(plan: dict) -> None:
     st.divider()
 
     st.subheader("Executive brief")
-    st.write(summary.get("description") or "No summary returned.")
+    st.write(
+        summary.get("description")
+        or "The SOW has been converted into a structured project plan for PM review. Contractual commitments remain unchanged until approved through normal project governance."
+    )
     eb1, eb2, eb3, eb4, eb5 = st.columns(5)
     eb1.metric("SOW items", leadership["sow_items"])
     eb2.metric("Executable coverage", f"{leadership['coverage']:g}%")
@@ -782,7 +790,7 @@ def show_plan(plan: dict) -> None:
 
     decision_rows = _decision_rows(schedule_rows, gaps, risks)
     if decision_rows:
-        st.subheader("PM / sponsor attention")
+        st.subheader("PM / Sponsor Attention")
         st.dataframe(
             pd.DataFrame(decision_rows),
             use_container_width=True,
@@ -790,8 +798,8 @@ def show_plan(plan: dict) -> None:
             key="pm_sponsor_attention_table",
         )
         st.caption(
-            "These items are surfaced from explicit SOW targets, deterministic planning checks and AI review. "
-            "Where the SOW does not provide an owner or due date, the application marks it for PM assignment rather than inventing one."
+            "This register shows all schedule findings, identified gaps and identified risks from the current plan. "
+            "Where the SOW does not provide an owner or due date, the application asks the PM to assign one rather than inventing it."
         )
 
     # PM-level schedule fit review. Every explicit SOW milestone is shown,
@@ -799,7 +807,7 @@ def show_plan(plan: dict) -> None:
     if schedule_rows:
         st.subheader("Schedule fit review")
         sc1, sc2, sc3, sc4, sc5 = st.columns(5)
-        sc1.metric("SOW milestones", len(sow_milestones))
+        sc1.metric("SOW milestones", leadership["sow_milestones"])
         sc2.metric("Aligned", aligned_count)
         sc3.metric("Watch", watch_count)
         sc4.metric("Exceptions", review_count)

@@ -185,31 +185,37 @@ def _week_number(value: object) -> int | None:
 
 
 def _schedule_review(plan: dict) -> list[dict[str, object]]:
-    """Compare every explicit SOW milestone with the dependency-driven activity plan.
+    """Reconcile every explicit SOW milestone to the dependency-driven plan.
 
-    Leadership reporting must not create false unmapped milestones merely because
-    the SOW uses a different wording from the generated activity. Matching priority:
-    1) shared SOW source ID, 2) milestone-specific planning synonyms, 3) token overlap.
+    Matching priority is deliberately conservative so leadership numbers do not
+    get inflated by broad keyword matches:
+      1. explicit activity milestone label
+      2. shared SOW source ID + semantic match
+      3. strong milestone-language match
+
+    For integration/deployment milestones, multiple activities may legitimately
+    contribute; for other milestones, only the best matching activity is used.
     """
+    stored_rows = (plan.get("metadata", {}) or {}).get("schedule_review_rows")
+    if isinstance(stored_rows, list):
+        return stored_rows
+
     synonym_rules = {
-        "project kickoff": ["kickoff", "charter"],
-        "discovery complete": ["discovery", "current-state", "assessment"],
-        "requirements sign-off": ["requirements", "requirement", "validate requirements", "approved requirements"],
-        "requirements approved": ["requirements", "requirement", "validate requirements", "approved requirements"],
-        "future-state design approved": ["future-state", "future state", "process design", "workflow", "approval rules"],
-        "solution design approved": ["solution architecture", "solution design", "technical design", "architecture"],
-        "configuration complete": ["configure", "configuration", "platform workflows", "roles", "reporting"],
-        "integration build complete": ["integration", "erp", "enterprise-system", "sso", "identity"],
-        "source data received": ["source data", "data extract", "data profiling", "historical data", "migration data"],
-        "trial data migration complete": ["trial migration", "rehearsal", "migration"],
-        "sit complete": ["system integration testing", "sit", "functional testing"],
-        "uat readiness": ["test strategy", "test plan", "uat readiness", "readiness"],
-        "uat complete": ["uat", "business acceptance", "uat sign-off", "acceptance"],
-        "production go-live": ["production deployment", "go-live", "deploy", "cutover"],
-        "wave 1 go-live": ["wave 1 production", "wave 1", "production deployment"],
-        "wave 2 go-live": ["wave 2 production", "wave 2", "production deployment"],
-        "wave 3 go-live": ["wave 3 production", "wave 3", "production deployment"],
-        "hypercare complete": ["hypercare", "stabilize production", "post-go-live support", "stabilization"],
+        "project kickoff": ["project kickoff", "kickoff", "charter"],
+        "discovery complete": ["discovery", "current state", "current-state", "assessment"],
+        "requirements sign-off": ["requirements sign off", "requirements sign-off", "requirements approved", "validate requirements"],
+        "requirements approved": ["requirements approved", "requirements sign off", "requirements sign-off", "validate requirements"],
+        "future-state design approved": ["future state", "future-state", "process design", "workflow design", "approval matrix"],
+        "solution design approved": ["solution design", "solution architecture", "technical design", "architecture"],
+        "configuration complete": ["configuration complete", "configure", "configuration", "workflow configuration", "business rules"],
+        "integration build complete": ["integration build", "integration", "erp integration", "enterprise integration", "sso"],
+        "source data received": ["source data received", "source data", "data extract", "data delivery", "migration data"],
+        "trial data migration complete": ["trial data migration", "trial migration", "migration rehearsal"],
+        "sit complete": ["sit complete", "system integration testing", "sit"],
+        "uat readiness": ["uat readiness", "test strategy", "test plan", "uat preparation"],
+        "uat complete": ["uat complete", "uat", "business acceptance", "uat sign-off"],
+        "production go-live": ["production go-live", "go-live", "production deployment", "cutover"],
+        "hypercare complete": ["hypercare complete", "hypercare", "stabilization", "post go-live support"],
     }
 
     def norm(text: object) -> str:
@@ -219,11 +225,15 @@ def _schedule_review(plan: dict) -> list[dict[str, object]]:
         n = norm(name)
         for label, terms in synonym_rules.items():
             if label in n:
-                return terms
-        # Generic normalization for names such as "UAT Approval" or
-        # "Production Deployment" that are not exact canonical labels.
-        terms = [t for t in n.split() if len(t) > 2]
-        return terms
+                return [norm(t) for t in terms]
+        return [t for t in n.split() if len(t) > 2]
+
+    def normalized_set(values: object) -> set[str]:
+        if isinstance(values, (list, tuple, set)):
+            return {str(v).strip() for v in values if str(v).strip()}
+        if values in (None, ""):
+            return set()
+        return {str(values).strip()}
 
     activities = plan.get("activities", []) or []
     explicit_milestones = [
@@ -233,110 +243,204 @@ def _schedule_review(plan: dict) -> list[dict[str, object]]:
 
     rows: list[dict[str, object]] = []
     for milestone in explicit_milestones:
-        target = _week_number(milestone.get("target"))
         milestone_name = str(milestone.get("name", "")).strip()
-        source_ids = set(milestone.get("source_sow_ids", []) or [])
+        target = _week_number(milestone.get("target"))
+        source_ids = normalized_set(milestone.get("source_sow_ids"))
+
+        base_row = {
+            "Milestone": milestone_name,
+            "SOW target": f"Week {target}" if target is not None else milestone.get("target", "—"),
+            "Planned finish": "—",
+            "Variance (weeks)": None,
+            "Status": "Unmapped",
+            "Match basis": "No confident activity link",
+        }
+
         if target is None:
-            rows.append({
-                "Milestone": milestone_name,
-                "SOW target": milestone.get("target", "—"),
-                "Planned finish": "—",
-                "Variance (weeks)": None,
-                "Status": "Unmapped",
-                "Match basis": "No explicit week target",
-            })
+            base_row["Match basis"] = "No explicit week target"
+            rows.append(base_row)
             continue
 
-        name_lower = norm(milestone_name)
-        preferred_terms = [norm(t) for t in terms_for(milestone_name) if norm(t)]
-
+        name_norm = norm(milestone_name)
+        preferred_terms = terms_for(milestone_name)
         scored: list[tuple[int, int, dict]] = []
+
         for activity in activities:
             activity_name = norm(activity.get("activity_name", ""))
             deliverable = norm(activity.get("deliverable", ""))
             phase = norm(activity.get("phase", ""))
-            activity_source_ids = set(activity.get("source_sow_ids", []) or [])
-            searchable = f"{activity_name} {deliverable} {phase}".strip()
+            activity_milestone = norm(activity.get("milestone", ""))
+            activity_source_ids = normalized_set(activity.get("source_sow_ids"))
+            searchable = f"{activity_name} {deliverable} {phase} {activity_milestone}".strip()
 
             source_match = bool(source_ids & activity_source_ids)
+            exact_milestone_match = bool(activity_milestone) and (
+                activity_milestone == name_norm
+                or name_norm in activity_milestone
+                or activity_milestone in name_norm
+            )
             semantic_hits = sum(1 for term in preferred_terms if term and term in searchable)
-            token_overlap = len(set(name_lower.split()) & set(searchable.split()))
+            name_tokens = set(name_norm.split())
+            search_tokens = set(searchable.split())
+            token_overlap = len(name_tokens & search_tokens)
 
-            # A shared source ID alone is not enough: a single "Major Milestones"
-            # SOW sentence can be the source for several different activities.
-            # Require at least one semantic/token link before using source evidence.
-            if source_match and semantic_hits:
-                score = 100 + semantic_hits * 10 + token_overlap
+            if exact_milestone_match:
+                score = 1000 + (100 if source_match else 0) + semantic_hits * 10 + token_overlap
+                basis_rank = 4
+            elif source_match and semantic_hits:
+                score = 700 + semantic_hits * 10 + token_overlap
                 basis_rank = 3
-            elif semantic_hits:
-                score = 50 + semantic_hits * 10 + token_overlap
+            elif semantic_hits >= 2:
+                score = 400 + semantic_hits * 10 + token_overlap
                 basis_rank = 2
-            elif token_overlap >= 1:
-                score = 10 + token_overlap
+            elif token_overlap >= 2:
+                score = 100 + token_overlap
                 basis_rank = 1
             else:
                 continue
             scored.append((score, basis_rank, activity))
 
-        scored.sort(key=lambda x: (x[0], x[1], int(x[2].get("finish_week") or 0)), reverse=True)
-
         if not scored:
-            rows.append({
-                "Milestone": milestone_name,
-                "SOW target": f"Week {target}",
-                "Planned finish": "—",
-                "Variance (weeks)": None,
-                "Status": "Unmapped",
-                "Match basis": "No confident activity link",
-            })
+            rows.append(base_row)
             continue
 
-        # Use the best evidence-backed activity. For a milestone such as
-        # "Integration Build Complete", multiple integration activities can exist;
-        # use the latest finish among activities that are tied to the same milestone
-        # semantics/source evidence.
-        best_score = scored[0][0]
-        best_rank = scored[0][1]
-        selected = [item[2] for item in scored if item[0] >= best_score - (10 if best_rank >= 2 else 0)]
+        scored.sort(
+            key=lambda x: (
+                x[0],
+                x[1],
+                int(x[2].get("finish_week") or 0),
+            ),
+            reverse=True,
+        )
+
+        best_score, best_rank, best_activity = scored[0]
+        milestone_key = name_norm
+        multi_activity = "integration" in milestone_key or "production go live" in milestone_key or "wave" in milestone_key
+
+        if multi_activity:
+            # Only aggregate activities that have essentially the same evidence level
+            # as the winner. This prevents generic deployment/configuration activities
+            # from inflating a milestone's planned finish.
+            selected = [
+                item[2]
+                for item in scored
+                if item[1] == best_rank and item[0] >= best_score - 25
+            ]
+        else:
+            selected = [best_activity]
+
         planned_finish = max(int(a.get("finish_week") or 0) for a in selected)
         variance = planned_finish - target
-        match_basis = {
-            3: "Shared SOW source ID",
-            2: "Planning-language match",
+        basis_text = {
+            4: "Explicit activity milestone match",
+            3: "Shared SOW source + semantic match",
+            2: "Strong planning-language match",
             1: "Token match",
         }[best_rank]
+
         rows.append({
             "Milestone": milestone_name,
             "SOW target": f"Week {target}",
             "Planned finish": f"Week {planned_finish}" if planned_finish else "—",
             "Variance (weeks)": variance,
             "Status": (
-                "Review"
-                if variance > 1
+                "Review" if variance > 1
+                else "Watch" if variance == 1
                 else "Aligned"
-                if variance <= 0
-                else "Watch"
             ),
-            "Match basis": match_basis,
+            "Match basis": basis_text,
+            "Linked activities": ", ".join(str(a.get("activity_name", "")) for a in selected),
         })
+
     return rows
 
 
+def _high_gap_count(rows: list[dict]) -> int:
+    """Count high-severity scope/clarification gaps only.
+
+    Schedule-fit findings are reported separately as schedule exceptions, and
+    AI review rows carry "Review" rather than an unsupported high-severity rating.
+    """
+    count = 0
+    for row in rows:
+        category = str(row.get("category", "")).strip().lower()
+        if category == "schedule fit" or category == "ai review":
+            continue
+        severity = _first_value(row, ["severity", "priority", "rating"], "").lower()
+        if severity in {"high", "critical", "severe"}:
+            count += 1
+    return count
+
+def _leadership_metrics(plan: dict) -> dict[str, object]:
+    """Return leadership metrics only from planner-reconciled metadata.
+
+    The UI must not recalculate headline counts independently from registers;
+    doing so can create denominator drift after AI merge or schedule enrichment.
+    """
+    meta = plan.get("metadata", {}) or {}
+    status_counts = meta.get("schedule_status_counts", {}) or {}
+    sow_item_count = int(meta.get("sow_item_count", len(plan.get("sow_items", []))) or 0)
+    activity_count = int(meta.get("activity_count", len(plan.get("activities", []))) or 0)
+    milestone_count = int(meta.get("explicit_milestone_count", 0) or 0)
+    scope_gap_count = int(meta.get("scope_or_review_gap_count", 0) or 0)
+    sow_gap_count = int(meta.get("sow_gap_count", scope_gap_count) or 0)
+    ai_gap_count = int(meta.get("ai_review_gap_count", 0) or 0)
+    schedule_finding_count = int(meta.get("schedule_finding_count", 0) or 0)
+    high_gap_count = int(meta.get("high_severity_sow_gap_count", 0) or 0)
+    risk_count = int(meta.get("risk_register_count", len(plan.get("risks", []))) or 0)
+    assumption_count = int(meta.get("assumption_register_count", len(plan.get("assumptions", []))) or 0)
+    constraint_count = int(meta.get("constraint_register_count", len(plan.get("constraints", []))) or 0)
+    coverage = float(meta.get("traceability_coverage_percent", 0) or 0)
+    planned_finish = meta.get("planned_finish_week")
+    sow_duration = meta.get("sow_duration_week")
+    return {
+        "sow_items": sow_item_count,
+        "activities": activity_count,
+        "sow_milestones": milestone_count,
+        "gaps": sow_gap_count,
+        "scope_or_review_gaps": scope_gap_count,
+        "ai_gaps": ai_gap_count,
+        "gap_register_total": int(meta.get("gap_register_count", 0) or 0),
+        "schedule_findings": schedule_finding_count,
+        "high_gaps": high_gap_count,
+        "risks": risk_count,
+        "assumptions": assumption_count,
+        "constraints": constraint_count,
+        "coverage": coverage,
+        "planned_finish_week": int(planned_finish) if planned_finish not in (None, "") else None,
+        "sow_duration_week": int(sow_duration) if sow_duration not in (None, "") else None,
+        "aligned": int(status_counts.get("Aligned", 0) or 0),
+        "watch": int(status_counts.get("Watch", 0) or 0),
+        "review": int(status_counts.get("Review", 0) or 0),
+        "unmapped": int(status_counts.get("Unmapped", 0) or 0),
+    }
+
+
 def _register_breakdown(rows: list[dict], kind: str) -> dict[str, int]:
-    """Separate deterministic/SOW-linked register rows from AI-added review rows."""
+    """Separate SOW-backed, AI-review and schedule-fit rows without mixing evidence classes."""
     total = len(rows)
     ai = 0
+    schedule = 0
     for row in rows:
-        source_ids = row.get("source_sow_ids") or []
         category = str(row.get("category", "")).strip().lower()
+        if kind == "gap" and category == "schedule fit":
+            schedule += 1
+            continue
+        source_ids = row.get("source_sow_ids") or []
         basis = str(row.get("basis", "")).strip().lower()
         identifier = str(
             row.get(f"{kind}_id", row.get("gap_id", row.get("risk_id", row.get("assumption_id", ""))))
         ).upper()
-        if identifier.startswith("AI-") or category == "ai review" or basis == "ai planning recommendation" or not source_ids:
+        if identifier.startswith("AI-") or category == "ai review" or basis == "ai planning recommendation" or str(row.get("origin", "")).strip().lower() == "ai":
             ai += 1
-    return {"total": total, "sow_or_plan": total - ai, "ai": ai}
-
+    non_schedule = total - schedule
+    return {
+        "total": total,
+        "non_schedule": non_schedule,
+        "sow_or_plan": non_schedule - ai,
+        "ai": ai,
+        "schedule": schedule,
+    }
 
 def _risk_profile(rows: list[dict]) -> dict[str, int]:
     """Return evidence-based risk counts without implying an unsupported high-risk rating."""
@@ -508,12 +612,7 @@ def _leader_status(
     unmapped = sum(1 for row in schedule_rows if row.get("Status") == "Unmapped")
     gap_breakdown = _register_breakdown(gaps, "gap")
     risk_breakdown = _register_breakdown(risks, "risk")
-    high_gaps = sum(
-        1
-        for row in gaps
-        if _first_value(row, ["severity", "priority", "rating"], "").lower()
-        in {"high", "critical", "severe"}
-    )
+    high_gaps = _high_gap_count(gaps)
     finish_variance = (
         planned_finish_week - sow_duration_week
         if planned_finish_week is not None and sow_duration_week is not None
@@ -523,12 +622,16 @@ def _leader_status(
     details = [
         f"{reviews} schedule exception(s)",
         f"{unmapped} unmapped milestone(s)",
-        f"{high_gaps} high-severity gap(s)",
+        f"{high_gaps} high-severity SOW gap(s) of {gap_breakdown['sow_or_plan']} SOW/plan gap(s) identified",
         f"{risk_breakdown['total']} risk(s) identified",
     ]
     if finish_variance is not None and finish_variance > 0:
         details.append(
             f"dependency-driven finish is {finish_variance} week(s) beyond the {sow_duration_week}-week SOW duration"
+        )
+    elif finish_variance is not None and finish_variance < 0:
+        details.append(
+            f"dependency-driven finish is {abs(finish_variance)} week(s) earlier than the {sow_duration_week}-week SOW duration target"
         )
 
     if reviews or unmapped or high_gaps or risk_breakdown["total"] or (finish_variance or 0) > 0:
@@ -556,31 +659,21 @@ def show_plan(plan: dict) -> None:
     # Leadership metrics are deliberately split between SOW/deterministic data
     # and AI-added review suggestions. This prevents AI additions from looking
     # like contractual SOW facts.
+    leadership = _leadership_metrics(plan)
     schedule_rows = _schedule_review(plan)
-    sow_milestones = [m for m in milestones if m.get("source") == "Explicit SOW milestone"]
     gap_breakdown = _register_breakdown(gaps, "gap")
     risk_breakdown = _register_breakdown(risks, "risk")
     assumption_breakdown = _register_breakdown(assumptions, "assumption")
-    unmapped_count = sum(1 for row in schedule_rows if row.get("Status") == "Unmapped")
-    review_count = sum(1 for row in schedule_rows if row.get("Status") == "Review")
-    watch_count = sum(1 for row in schedule_rows if row.get("Status") == "Watch")
-    aligned_count = sum(1 for row in schedule_rows if row.get("Status") == "Aligned")
-    high_gaps = sum(
-        1
-        for row in gaps
-        if _first_value(row, ["severity", "priority", "rating"], "").lower()
-        in {"high", "critical", "severe"}
-    )
-    planned_finish_week = metadata.get("planned_finish_week")
-    sow_duration_week = metadata.get("latest_explicit_target_week")
-    try:
-        planned_finish_week = int(planned_finish_week) if planned_finish_week not in (None, "") else None
-    except (TypeError, ValueError):
-        planned_finish_week = None
-    try:
-        sow_duration_week = int(sow_duration_week) if sow_duration_week not in (None, "") else None
-    except (TypeError, ValueError):
-        sow_duration_week = None
+    unmapped_count = leadership["unmapped"]
+    review_count = leadership["review"]
+    watch_count = leadership["watch"]
+    aligned_count = leadership["aligned"]
+    high_gaps = leadership["high_gaps"]
+    planned_finish_week = leadership["planned_finish_week"]
+    sow_duration_week = leadership["sow_duration_week"]
+    if sow_duration_week is None:
+        fallback = metadata.get("latest_explicit_target_week")
+        sow_duration_week = int(fallback) if fallback not in (None, "") else None
     finish_variance = (
         planned_finish_week - sow_duration_week
         if planned_finish_week is not None and sow_duration_week is not None
@@ -601,40 +694,67 @@ def show_plan(plan: dict) -> None:
     )
 
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("SOW items", len(sow_items))
-    c2.metric("Activities", len(activities))
-    c3.metric("SOW milestones", len(sow_milestones))
-    c4.metric("Gaps", gap_breakdown["total"])
-    c5.metric("Executable coverage", f"{_coverage(plan):g}%")
+    c1.metric("SOW items", leadership["sow_items"])
+    c2.metric("Activities", leadership["activities"])
+    c3.metric("SOW milestones", leadership["sow_milestones"])
+    c4.metric("SOW/plan gaps", leadership["gaps"])
+    c5.metric("Executable coverage", f"{leadership['coverage']:g}%")
 
-    c6, c7, c8, c9 = st.columns(4)
-    c6.metric("Risks", risk_breakdown["total"])
-    c7.metric("Assumptions", assumption_breakdown["total"])
-    c8.metric("Constraints", len(constraints))
-    c9.metric(
+    c6, c7, c8, c9, c10 = st.columns(5)
+    c6.metric("Risks", leadership["risks"])
+    c7.metric("Assumptions", leadership["assumptions"])
+    c8.metric("Constraints identified", leadership["constraints"])
+    c9.metric("Schedule findings", leadership["schedule_findings"])
+    c10.metric(
         "Dependency-driven finish",
         f"Week {planned_finish_week}" if planned_finish_week is not None else "—",
-        delta=(f"+{finish_variance} week" if finish_variance == 1 else f"+{finish_variance} weeks" if finish_variance and finish_variance > 1 else None),
-        delta_color="inverse" if finish_variance and finish_variance > 0 else "normal",
+        delta=(f"{finish_variance:+d} week" if isinstance(finish_variance, int) and abs(finish_variance) == 1 else f"{finish_variance:+d} weeks" if isinstance(finish_variance, int) and finish_variance else None),
+        delta_color="off",
     )
 
     st.caption(
-        f"Register totals after AI review: {len(gaps)} gaps ({gap_breakdown['sow_or_plan']} SOW/plan + {gap_breakdown['ai']} AI), "
+        f"Gap reconciliation: {leadership['gaps']} SOW/plan gaps + {leadership['ai_gaps']} AI review gaps + {leadership['schedule_findings']} schedule findings = {leadership['gap_register_total']} total gap-register rows. "
         f"{len(risks)} risks ({risk_breakdown['sow_or_plan']} SOW/plan + {risk_breakdown['ai']} AI), "
         f"{len(assumptions)} assumptions ({assumption_breakdown['sow_or_plan']} SOW + {assumption_breakdown['ai']} AI)."
     )
     st.caption(
-        "Leadership totals include AI review additions. The source breakdown above is informational; AI rows are not contractual SOW commitments."
+        "Leadership cards separate scope/clarification gaps from schedule findings. AI rows are planning advice, not contractual SOW commitments."
     )
 
-    if len(schedule_rows) != len(sow_milestones):
+    recon_errors = list(metadata.get("reconciliation_errors", []) or [])
+    recon_warnings = list(metadata.get("reconciliation_warnings", []) or [])
+    # A defensive UI-level check: if a future UI change makes a register length
+    # disagree with the planner's authoritative metadata, leadership must see an
+    # error instead of a plausible-looking but inconsistent number.
+    ui_checks = {
+        "SOW items": len(sow_items) == leadership["sow_items"],
+        "Activities": len(activities) == leadership["activities"],
+        "SOW milestones": len([m for m in milestones if m.get("source") == "Explicit SOW milestone"]) == leadership["sow_milestones"],
+        "Risks": len(risks) == leadership["risks"],
+        "Assumptions": len(assumptions) == leadership["assumptions"],
+        "Constraints": len(constraints) == leadership["constraints"],
+        "SOW/plan gaps": int(metadata.get("sow_gap_count", 0) or 0) == leadership["gaps"],
+        "AI review gaps": int(metadata.get("ai_review_gap_count", 0) or 0) == leadership["ai_gaps"],
+        "Gap register total": int(metadata.get("gap_register_count", 0) or 0) == leadership["gap_register_total"],
+    }
+    ui_mismatches = [name for name, ok in ui_checks.items() if not ok]
+    if ui_mismatches:
+        recon_errors.append("Leadership UI/register mismatch: " + ", ".join(ui_mismatches))
+    if recon_errors:
+        st.error("Leadership reconciliation: ERROR — the generated plan contains internal consistency defects and must not be baselined or exported. " + " ".join(str(x) for x in recon_errors[:5]))
+    else:
+        st.success("Leadership reconciliation: PASS — headline counts, traceability, dependencies and schedule status totals reconcile to the generated registers.")
+    if recon_warnings:
+        st.caption(f"Reconciliation warnings: {len(recon_warnings)} informational item(s).")
+
+    if len(schedule_rows) != leadership["sow_milestones"]:
         st.error(
-            f"Schedule-fit reconciliation error: {len(schedule_rows)} rows returned for {len(sow_milestones)} explicit SOW milestones."
+            f"Schedule-fit reconciliation error: {len(schedule_rows)} rows returned for {leadership['sow_milestones']} explicit SOW milestones."
         )
 
     if unmapped_count:
         st.warning(
-            f"{unmapped_count} of {len(sow_milestones)} explicit SOW milestones could not be linked confidently to a planning activity. "
+            f"{unmapped_count} of {leadership['sow_milestones']} explicit SOW milestones could not be linked confidently to a planning activity. "
             "Review the unmapped milestone before baseline."
         )
 
@@ -643,13 +763,13 @@ def show_plan(plan: dict) -> None:
     st.subheader("Executive brief")
     st.write(summary.get("description") or "No summary returned.")
     eb1, eb2, eb3, eb4, eb5 = st.columns(5)
-    eb1.metric("SOW items", len(sow_items))
-    eb2.metric("Executable coverage", f"{_coverage(plan):g}%")
+    eb1.metric("SOW items", leadership["sow_items"])
+    eb2.metric("Executable coverage", f"{leadership['coverage']:g}%")
     eb3.metric("Schedule exceptions", review_count)
     eb4.metric("Watch items", watch_count)
-    eb5.metric("High gaps", high_gaps)
+    eb5.metric("High-severity SOW gaps", f"{high_gaps} of {leadership['gaps']}")
     st.caption(
-        f"Risks identified: {len(risks)} · SOW duration target: "
+        f"Risks identified: {leadership['risks']} · SOW duration basis: {metadata.get('sow_duration_source', 'Not stated')} · SOW duration target: "
         f"{f'Week {sow_duration_week}' if sow_duration_week is not None else '—'} · "
         f"Dependency-driven finish: {f'Week {planned_finish_week}' if planned_finish_week is not None else '—'}"
         + (f" · Planning variance: +{finish_variance} week(s)" if finish_variance and finish_variance > 0 else "")
@@ -685,8 +805,8 @@ def show_plan(plan: dict) -> None:
         sc4.metric("Exceptions", review_count)
         sc5.metric("Unmapped", unmapped_count)
         st.caption(
-            "Each explicit SOW milestone is compared with the finish of its linked planning activity. "
-            "'Review' means more than one week late; 'Watch' means one week late; 'Unmapped' means no confident activity link. "
+            "Every explicit SOW milestone is shown exactly once. Week-based targets are compared with the dependency-driven working-week plan. "
+            "'Review' means more than one week late; 'Watch' means one week late; 'Unmapped' means no confident activity link or no week-based target. "
             "This is a planning check, not a revised contractual milestone."
         )
         st.dataframe(
@@ -708,7 +828,13 @@ def show_plan(plan: dict) -> None:
         if finish_variance is not None and finish_variance > 0:
             st.warning(
                 f"The dependency-driven plan finishes around Week {planned_finish_week}, "
-                f"which is {finish_variance} week(s) beyond the latest explicit SOW target of Week {sow_duration_week}."
+                f"which is {finish_variance} week(s) beyond the SOW duration target of Week {sow_duration_week}."
+            )
+        elif finish_variance is not None and finish_variance < 0:
+            st.info(
+                f"The dependency-driven plan currently finishes around Week {planned_finish_week}, "
+                f"which is {abs(finish_variance)} week(s) earlier than the SOW duration target of Week {sow_duration_week}. "
+                "This is an earliest-start planning result; client dependencies, contractual wait periods and calendar constraints still require PM review."
             )
 
     tabs = st.tabs(
@@ -844,8 +970,11 @@ def show_plan(plan: dict) -> None:
         if gdf.empty:
             st.success("No planning gaps were identified.")
         else:
-            high_count = int((gdf["severity"].astype(str).str.lower().isin(["high", "critical", "severe"])).sum()) if "severity" in gdf else 0
-            st.metric("High-severity gaps", high_count)
+            high_count = leadership["high_gaps"]
+            st.metric("High-severity SOW gaps", f"{high_count} of {leadership['gaps']}")
+            st.caption(
+                f"SOW/plan gaps: {leadership['gaps']} · AI review gaps: {leadership['ai_gaps']} · Schedule findings: {leadership['schedule_findings']} · Total gap-register rows: {leadership['gap_register_total']}"
+            )
             st.dataframe(
                 pd.DataFrame(_management_rows(gaps, "gap")),
                 use_container_width=True,
@@ -860,8 +989,7 @@ def show_plan(plan: dict) -> None:
         if rdf.empty:
             st.success("No planning risks were identified.")
         else:
-            high_count = int((rdf["severity"].astype(str).str.lower().isin(["high", "critical", "severe"])).sum()) if "severity" in rdf else 0
-            st.metric("Risks", len(rdf))
+            st.metric("Risks identified", len(rdf))
             st.dataframe(
                 pd.DataFrame(_management_rows(risks, "risk")),
                 use_container_width=True,
@@ -914,6 +1042,7 @@ def show_plan(plan: dict) -> None:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="download_project_plan_excel",
         on_click="ignore",
+        disabled=bool(metadata.get("reconciliation_errors")),
     )
 
 
@@ -1053,7 +1182,7 @@ def main() -> None:
                     plan = merge_ai_advice(plan, ai_advice)
                     plan["metadata"]["engine"] = "groq_qwen38_hybrid"
                     plan["metadata"]["engine_version"] = (
-                        "planner-v4 + groq-qwen38-advice"
+                        "planner-v5 + groq-qwen38-advice"
                     )
                     engine = "Groq AI planner + planning engine"
                 except Exception as exc:
@@ -1066,13 +1195,18 @@ def main() -> None:
 
             plan = validate_and_normalize_plan(plan)
 
-            create_project(
-                db,
-                name=project_name.strip(),
-                source_name=uploaded.name if uploaded else "Pasted SOW",
-                plan=plan,
-                engine_name=engine,
-            )
+            try:
+                create_project(
+                    db,
+                    name=project_name.strip(),
+                    source_name=uploaded.name if uploaded else "Pasted SOW",
+                    plan=plan,
+                    engine_name=engine,
+                )
+            except Exception as exc:
+                # Persistence must never block plan generation in the MVP.
+                plan.setdefault("metadata", {})["persistence_error"] = str(exc)[:1000]
+                st.warning("The project plan was generated successfully, but persistent project storage was unavailable for this run.")
 
             st.session_state["plan"] = plan
             st.session_state["generated_at"] = datetime.now(

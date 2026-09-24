@@ -6,7 +6,7 @@ import re
 from copy import deepcopy
 from typing import Any
 
-PLANNER_VERSION = "v11.0"
+PLANNER_VERSION = "v11.1"
 
 
 def _stable_id(prefix: str, text: str, index: int = 0) -> str:

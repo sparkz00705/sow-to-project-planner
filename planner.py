@@ -6,7 +6,7 @@ import re
 from copy import deepcopy
 from typing import Any
 
-PLANNER_VERSION = "v7.0"
+PLANNER_VERSION = "v8.0"
 
 
 def _stable_id(prefix: str, text: str, index: int = 0) -> str:
@@ -1140,7 +1140,13 @@ def build_schedule_review(milestones: list[dict[str, Any]], activities: list[dic
         else:
             selected = [best_activity]
 
-        planned_finish = max(int(a.get("finish_week") or 0) for a in selected)
+        supporting_finish = max(int(a.get("finish_week") or 0) for a in selected)
+        # An explicit SOW milestone is a contractual checkpoint, not the same thing as
+        # the finish date of the activity that prepares it. If the supporting activity
+        # completes on or before the milestone target, the milestone is considered met
+        # on its committed SOW week (variance = 0). Only a late supporting activity
+        # should create a positive milestone variance.
+        planned_finish = target if supporting_finish <= target else supporting_finish
         variance = planned_finish - target
         rows.append(
             {

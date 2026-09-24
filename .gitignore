@@ -1,8 +1,5 @@
 __pycache__/
-*.py[cod]
-.venv/
+*.pyc
 .env
 .streamlit/secrets.toml
 data/
-*.sqlite3
-.DS_Store

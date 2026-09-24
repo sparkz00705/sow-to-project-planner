@@ -1,25 +1,13 @@
 # Architecture
 
-## Logical flow
+## Core pipeline
+SOW document/text → extraction → SOW classification → deterministic planning model → optional Groq/Qwen compact advice → quality registers → persistence → Excel export.
 
-SOW input → document extraction → Groq/Qwen SOW analysis → planning model → validation → database → PM review → Excel export
-
-## AI
-
-Groq REST API using `qwen/qwen3.8-27b` with strict structured JSON output. Groq documents JSON Schema support for this model.
-
-## Database
-
-SQLAlchemy provides the database abstraction. The application uses PostgreSQL when `DATABASE_URL` is configured and otherwise falls back to SQLite.
-
-## Persistence
-
-SQLite is suitable for local development. Streamlit Community Cloud local file storage is not guaranteed to persist across restarts, so PostgreSQL is recommended when project history must persist.
-
-## Security
-
-API credentials are read from Streamlit Secrets. Secrets must never be committed to GitHub.
-
-## Wake-up
-
-`wake_streamlit.py` uses Selenium to open the deployed Streamlit URL and click the wake-up button when the sleep page is displayed. The script can be called from a GitHub Actions scheduled workflow.
+## Principles
+1. The SOW is the source of truth.
+2. Only executable scope becomes project-plan activities.
+3. Commercials, exclusions, responsibilities, assumptions, risks, gaps and acceptance criteria are not activities.
+4. Explicit SOW milestones are preserved separately from tasks.
+5. AI is advisory; deterministic logic produces the consistent full plan.
+6. PostgreSQL is supported through `DATABASE_URL`; SQLite is the no-setup fallback.
+7. No configuration or database details are shown in the end-user UI.

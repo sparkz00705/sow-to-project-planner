@@ -1,81 +1,24 @@
+
 from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
 
 import pandas as pd
+import requests
 import streamlit as st
 
-from ai import generate_plan_with_groq, get_groq_config
-from db import create_project, init_db, list_projects, load_project, record_visit
+from ai import generate_ai_advice, get_groq_config
+from db import create_project, init_db, list_projects, load_project
 from exporter import build_excel_workbook
 from extract import extract_document
-from planner import build_fallback_plan, validate_and_normalize_plan
+from planner import build_deterministic_plan, merge_ai_advice, validate_and_normalize_plan
+
 
 st.set_page_config(page_title="SOW → Project Planner", page_icon="📋", layout="wide")
 
-SAMPLE_SOW = r'''
-STATEMENT OF WORK (SOW)
-Enterprise Digital Operations Platform Implementation
-SOW Reference: EDP-2026-017 | Planned Duration: 40 weeks | Users: ~2,500 | Sites: 12 across India, UK, Germany, US and Singapore
-1. Purpose
-The Client will implement a centralized Digital Operations Platform replacing multiple legacy processes managed through spreadsheets, email, shared drives and three departmental applications. The solution will standardize operational requests, document management, approvals, issue management, reporting, audit trails, notifications and management dashboards.
-2. Objectives
-Implement the platform for approximately 2,500 users; standardize workflows across 12 sites; migrate agreed historical data; integrate with ERP, identity management, email, collaboration and document-management environments; establish role-based access and segregation of duties; provide dashboards and reporting; enable audit history; train end users, power users, administrators and support teams; complete formal testing and business acceptance; deploy in three production waves and transition to business-as-usual support.
-3. In Scope
-Project management and governance; discovery and current-state assessment; future-state process design; requirements workshops; functional and technical design; platform and workflow configuration; role and permission configuration; notifications; dashboards and reports; data cleansing support; historical data migration; ERP integration; identity and SSO integration; email integration; document-management integration; collaboration notifications; system integration testing; performance testing; security testing coordination; UAT support; migration rehearsal; cutover planning; end-user and administrator training; production deployment; hypercare; knowledge transfer; operational handover.
-4. Out of Scope
-Replacement of the ERP or identity platform; new enterprise data warehouse; replacement of the corporate document-management system; mobile application development; custom functionality requiring more than 20 person-days per feature; data older than seven years unless approved; migration of unstructured personal working files; hardware procurement; network infrastructure upgrades; third-party license procurement; ongoing production support after the 30-day hypercare period.
-5. Geography and Functions
-India 4 sites, UK 2, Germany 2, US 3 and Singapore 1. Participating functions: Operations, Quality, Finance, Procurement, IT, Human Resources and Corporate Services. Up to two additional sites may be added during the project subject to schedule and impact assessment.
-6. Workstream A - Project Management and Governance
-Establish project charter, governance structure and Steering Committee; maintain weekly status reports, RAID log, decisions, dependencies, financial tracking, schedule, change control and stakeholder communications.
-7. Workstream B - Discovery and Requirements
-Conduct stakeholder interviews, current-state assessment, process inventory, requirements workshops, business and non-functional requirements, reporting, security, data and integration requirements. Validate and obtain requirements sign-off.
-8. Workstream C - Future-State Process Design
-Design standardized future-state workflows, roles, approval matrices, exception handling, escalation and notification rules. A maximum of 15% of current-state processes may require local variations; variations above this threshold require Steering Committee review.
-9. Workstream D - Solution Design and Configuration
-Create solution architecture and configure Development, Test, Validation and Production environments. Configure workflows, business rules, roles, permissions, notifications, dashboards, reports and audit logging.
-10. Workstream E - ERP Integration
-Exchange employee master data, organizational units, cost centers, supplier information and selected transaction reference data with the ERP. Use REST APIs where available and secure file transfer where an API is unavailable. The Client will provide API specifications and test credentials by Week 8.
-11. Workstream F - Identity and Access Management
-Implement SSO, user provisioning, role and group mapping, deprovisioning, access review support and privileged administrator access. Multi-factor authentication remains with the existing identity platform.
-12. Workstream G - Document Management
-Integrate with the existing document-management platform for metadata mapping, document upload and retrieval, version reference, permission enforcement and document-link migration for agreed records. Migration of document binaries is excluded.
-13. Workstream H - Data Migration
-Migrate up to seven years of historical data from Legacy Application A, Legacy Application B, departmental spreadsheets and selected CSV extracts. Perform source assessment, profiling, mapping, cleansing, transformation, migration scripts, trial migration, reconciliation, business validation and production migration. The Client owns approval of source-data cleansing rules.
-14. Workstream I - Testing and Quality
-Create test strategy and execute functional testing, SIT, regression testing, performance testing, security testing coordination, UAT, defect management and retesting. Severity 1 and Severity 2 defects must be resolved before production unless formally waived. Severity 3 defects may be deferred with business approval.
-15. Workstream J - Training and Change Management
-Train end users, power users, site administrators, global administrators and service desk personnel. Deliver user guides, quick reference guides, administrator guides, training presentations and recorded demonstrations. The Client will nominate site champions.
-16. Workstream K - Deployment and Cutover
-Deploy in three waves: Wave 1 India and Singapore; Wave 2 UK and Germany; Wave 3 US. Each wave requires readiness assessment, final data migration, configuration verification, access validation, business smoke testing, production deployment, business confirmation and hypercare initiation. Minimum five business days are required between waves unless the Steering Committee approves an exception.
-17. Workstream L - Hypercare and Handover
-Provide 30 calendar days of hypercare after the final production deployment including incident triage, defect support, configuration corrections, user support, daily issue review for two weeks, weekly review thereafter, knowledge transfer and final operational handover.
-18. Major Deliverables
-Project Charter; Integrated Project Management Plan; Stakeholder Register; Governance Plan; RAID Log; Requirements Catalogue; Requirements Traceability Matrix; Current-State Process Catalogue; Future-State Process Design; Solution Design Document; Security and Access Design; Integration Design Specifications; Data Migration Strategy; Data Mapping Specifications; Data Cleansing Rules; Migration Reconciliation Report; configured Development, Test, Validation and Production environments; System Test Plan; SIT Results; Performance Test Results; UAT Plan; UAT Results; Defect Register; Training Plan; Training Materials; Cutover Plan; Go-Live Readiness Assessment; Production Deployment Report; Hypercare Report; Knowledge Transfer Package; Operational Support Documentation; Project Closure Report.
-19. Milestones
-Project Kickoff Week 1; Discovery Complete Week 5; Requirements Sign-off Week 8; Future-State Design Approved Week 11; Solution Design Approved Week 13; Configuration Complete Week 21; Integration Build Complete Week 23; Trial Data Migration Complete Week 24; SIT Complete Week 28; UAT Readiness Week 29; UAT Complete Week 32; Wave 1 Go-Live Week 34; Wave 2 Go-Live Week 36; Wave 3 Go-Live Week 38; Hypercare Complete Week 40.
-20. Dependencies
-Client SME availability; ERP API specifications; integration test environments; identity-provider configuration; document-management APIs; source-data extracts; data cleansing; requirements and design approvals; test users; timely defect resolution; site champions; infrastructure readiness; security review; production change-window approval. The implementation partner is not responsible for delays caused exclusively by Client or third-party dependencies.
-21. Responsibilities
-Client: executive sponsorship, SMEs, access, environments, credentials, source data, approvals, cleansing decisions, UAT resources, site champions, defect decisions, cutover approval and operational resources after handover. Implementation Partner: project management, solution and functional resources, platform configuration, integrations, migration utilities, documentation, testing coordination, training materials, cutover support, hypercare and knowledge transfer.
-22. Commercial Assumptions
-Base implementation fee USD 780,000. Excludes third-party licenses, direct cloud infrastructure charges, travel unless included, major custom development outside scope, sites beyond 12, data beyond seven years and major process redesign beyond the 15% local-variation threshold.
-23. Schedule Assumptions
-Client SMEs available at least 20 hours/week during requirements and UAT; source data delivered by Week 10; ERP API specifications by Week 8; security review starts by Week 18; UAT users confirmed by Week 26; production change windows approved at least 15 business days before deployment.
-24. Acceptance Criteria
-Deliverables are accepted when provided, reviewed and approved by the designated Client approver. Go-live requires critical functionality tested, no open Severity 1 defects, Severity 2 defects resolved or formally accepted, UAT completed, production access configured, production data migrated and reconciled, cutover checklist completed and business owner approval. Final acceptance occurs after all three waves, hypercare, documentation, knowledge transfer and transfer of outstanding actions.
-25. Risks and Constraints
-Legacy data quality; undocumented legacy interfaces; ERP API delays; local process variation; UAT resource constraints; migration reconciliation issues; additional security controls; limited production windows; third-party system changes; additional requirements during discovery.
-26. Deliberate Clarifications
-The Client may add up to two sites subject to schedule and impact assessment. The phrase “complete audit history” is not further defined. Security testing coordination is included but ownership of the actual penetration test is not stated. Performance testing has no numerical target. The SOW does not define exact migrated record volume. The 15% local-variation threshold has no measurement method. Severity 2 acceptance has no numerical limit. Business smoke testing has no entry/exit criteria.
-'''.strip()
 
-
-@st.cache_resource
-def database():
-    return init_db(get_secret("DATABASE_URL", ""))
+COMPLEX_SAMPLE_SOW = '# Statement of Work (SOW)\n## Enterprise Digital Operations Platform Implementation\n\nSOW Reference: EDP-2026-017\nPlanned Duration: 40 weeks\nTarget Countries: India, United Kingdom, Germany, United States, Singapore\nTarget Users: Approximately 2,500 users across 12 sites\n\n## 1. Purpose\nThe Client intends to implement a centralized Digital Operations Platform to replace multiple legacy processes currently managed through spreadsheets, email, shared drives, and three departmental applications.\n\n## 2. Project Objectives\nThe project objectives are to implement a centralized enterprise platform for approximately 2,500 users, standardize operational workflows across 12 sites, migrate agreed historical data, integrate with ERP, identity management, email, collaboration and document-management environments, establish role-based access and segregation of duties, provide management dashboards and audit history, train users and support teams, complete formal testing and business acceptance, deploy in three production waves, and transition to business-as-usual support.\n\n## 3. Scope\n### Workstream 1 - Project Management and Governance\nThe Implementation Partner shall provide project management and implementation governance.\nThe project will establish project kickoff, governance structure, Steering Committee, weekly project reporting, RAID management, decision management, dependency management, financial tracking, schedule management, change control, and stakeholder communications.\n\n### Workstream 2 - Discovery and Requirements\nThe Implementation Partner shall conduct stakeholder interviews, current-state process assessment, process inventory, requirements workshops, business requirements documentation, non-functional requirements, reporting requirements, security requirements, data requirements, integration requirements, requirements validation, and requirements sign-off.\n\n### Workstream 3 - Future-State Process Design\nThe Implementation Partner shall design standardized future-state workflows, roles, approval matrices, exception handling, escalation rules, and notification rules.\nA maximum of 15% of the current-state processes may require local variations. Any variation above this threshold will require Steering Committee review.\n\n### Workstream 4 - Solution Design and Configuration\nThe Implementation Partner shall complete solution architecture and configure Development, Test, Validation and Production environments.\nThe Implementation Partner shall configure workflows, business rules, user roles, permissions, notifications, dashboards, reports, and audit logging.\n\n### Workstream 5 - ERP Integration\nThe new platform will exchange employee master data, organizational units, cost centers, supplier information, and selected transaction reference data with the Client ERP.\nThe integration will use REST APIs where available and secure file transfer where an API is not available.\nThe Client will provide API specifications and test credentials by Week 8.\n\n### Workstream 6 - Identity and Access Management\nThe solution shall integrate with the Client enterprise identity provider.\nThe scope includes Single Sign-On, user provisioning, role mapping, group mapping, deprovisioning, access review support, and privileged administrator access.\nMulti-factor authentication will be provided through the existing Client identity platform and is not part of the application implementation.\n\n### Workstream 7 - Document Management\nThe solution will integrate with the Client existing document-management platform for metadata mapping, document upload and retrieval, version reference, permission enforcement, and document-link migration for agreed records.\nMigration of document binaries is excluded from the base scope.\n\n### Workstream 8 - Data Migration\nThe project will migrate up to seven years of historical data from Legacy Application A, Legacy Application B, departmental spreadsheets, and selected CSV extracts.\nThe migration approach will include source assessment, data profiling, data mapping, data cleansing, transformation rules, migration scripts, trial migration, reconciliation, business validation, and production migration.\nThe Client is responsible for ownership and approval of source-data cleansing rules.\n\n### Workstream 9 - Testing and Quality\nTesting will include test strategy, test planning, functional testing, System Integration Testing, regression testing, performance testing, security testing coordination, User Acceptance Testing, defect management, retesting, and test summary reporting.\nThe Implementation Partner will resolve Severity 1 and Severity 2 defects identified during testing before production deployment unless formally waived by the Client.\nSeverity 3 defects may be deferred subject to documented business approval.\n\n### Workstream 10 - Training and Change Management\nTraining shall cover end users, power users, site administrators, global administrators, and service desk personnel.\nTraining materials will include user guides, quick reference guides, administrator guides, training presentations, and recorded demonstrations.\nThe Client will nominate site champions for each participating location.\n\n### Workstream 11 - Deployment and Cutover\nThe production deployment will use three waves.\nWave 1: India and Singapore.\nWave 2: United Kingdom and Germany.\nWave 3: United States.\nEach deployment wave will include cutover readiness assessment, final data migration, configuration verification, access validation, business smoke testing, production deployment, business confirmation, and hypercare initiation.\nA minimum of five business days is required between production waves unless the Steering Committee approves an exception.\n\n### Workstream 12 - Hypercare and Handover\nThe Implementation Partner will provide 30 calendar days of hypercare after the final production deployment.\nHypercare includes incident triage, defect support, configuration corrections, user support, daily issue review during the first two weeks, weekly issue review thereafter, knowledge transfer, operational documentation, and final handover.\n\n## 4. Out of Scope\nThe following items are excluded unless approved through formal change control: replacement of the Client ERP; replacement of the Client identity-management platform; development of a new enterprise data warehouse; replacement of the corporate document-management system; mobile application development; custom functionality requiring more than 20 person-days per feature; historical data older than seven years unless approved; migration of unstructured personal working files; hardware procurement; network infrastructure upgrades; third-party license procurement; and ongoing production support after the 30-day hypercare period.\n\n## 5. Major Deliverables\nThe following deliverables are required: Project Charter; Integrated Project Management Plan; Stakeholder Register; Governance Plan; RAID Log; Requirements Catalogue; Requirements Traceability Matrix; Current-State Process Catalogue; Future-State Process Design; Solution Design Document; Security and Access Design; Integration Design Specifications; Data Migration Strategy; Data Mapping Specifications; Data Cleansing Rules; Migration Reconciliation Report; configured Development, Test, Validation and Production environments; System Test Plan; SIT Results; Performance Test Results; UAT Plan; UAT Results; Defect Register; Training Plan; Training Materials; Cutover Plan; Go-Live Readiness Assessment; Production Deployment Report; Hypercare Report; Knowledge Transfer Package; Operational Support Documentation; Project Closure Report.\n\n## 6. Major Milestones\nProject Kickoff Week 1; Discovery Complete Week 5; Requirements Sign-off Week 8; Future-State Design Approved Week 11; Solution Design Approved Week 13; Configuration Complete Week 21; Integration Build Complete Week 23; Trial Data Migration Complete Week 24; SIT Complete Week 28; UAT Readiness Week 29; UAT Complete Week 32; Wave 1 Go-Live Week 34; Wave 2 Go-Live Week 36; Wave 3 Go-Live Week 38; Hypercare Complete Week 40.\n\n## 7. Dependencies\nKey dependencies include Client availability of business SMEs, availability of ERP API specifications, availability of integration test environments, identity-provider configuration, document-management APIs, source-data extracts, completion of data cleansing, requirements and design approvals, availability of test users, timely resolution of business defects, availability of site champions, infrastructure readiness, security review completion, and production change-window approval.\n\nThe Implementation Partner is not responsible for delays caused exclusively by Client or third-party dependency delays unless otherwise agreed.\n\n## 8. Client Responsibilities\nThe Client shall provide executive sponsorship, business and technical SMEs, timely access to relevant systems, required environments and credentials, source data, requirements and design approvals, data-cleansing decisions, UAT resources, site champions, defect decisions, cutover approval, and operational support resources after handover.\n\n## 9. Implementation Partner Responsibilities\nThe Implementation Partner shall provide project management, solution and functional resources, platform configuration, agreed integrations, migration utilities, documentation, testing coordination, training materials, cutover support, hypercare, and knowledge transfer.\n\n## 10. Resources\nIndicative Implementation Partner roles include Program/Project Manager, Business Analyst, Solution Architect, Technical Architect, Integration Lead, Data Migration Lead, Configuration Lead, Test Manager, Security Specialist, Training Lead, Change Management Lead, Deployment Lead, and Application Support Specialist.\n\n## 11. Commercial Assumptions\nThe base implementation fee is USD 780,000.\nThe fee includes professional services within the agreed scope.\nThird-party licenses, direct cloud infrastructure charges, travel unless explicitly included, major custom development outside the agreed scope, sites beyond 12, historical data beyond seven years, and major process redesign beyond the 15% local-variation threshold are excluded.\n\n## 12. Schedule Assumptions\nThe 40-week schedule assumes Client SMEs are available at least 20 hours per week during requirements and UAT; source data is delivered by Week 10; ERP API specifications are available by Week 8; security review begins by Week 18; UAT users are confirmed by Week 26; and production change windows are approved at least 15 business days before deployment.\n\n## 13. Acceptance Criteria\nA deliverable is accepted when it has been provided, reviewed, comments addressed, and approved by the designated Client approver.\nProduction go-live requires critical functionality successfully tested, no open Severity 1 defects, Severity 2 defects resolved or formally accepted, UAT completed, required production access configured, production data migration completed and reconciled, cutover checklist completed, and business owner approval.\n\n## 14. Risks and Constraints\nInitial known risks include legacy data quality, undocumented legacy interfaces, ERP API delays, local process variation, UAT resource constraints, migration reconciliation issues, additional security controls, limited production windows, third-party system changes, and additional requirements during discovery.\n\nThe following ambiguities require clarification: the phrase “complete audit history” is not further defined; security testing coordination is included but ownership of the actual penetration test is not stated; performance testing has no numerical target; the SOW does not define exact migrated record volume; and business smoke testing has no entry/exit criteria.\n\n## 15. Governance\nGovernance will include a weekly project team meeting, a biweekly Steering Committee, and a monthly Executive Review covering schedule, budget, major risks, decisions, scope changes, and benefits indicators.\n\n## 16. Reporting\nThe Implementation Partner will provide a weekly status report containing overall project status, milestone status, schedule variance, budget status, RAID summary, decisions required, dependency status, change requests, workstream status, and planned activities for the following two weeks.\n\n## 17. Change Control\nAny requested change affecting scope, schedule, cost, resources, deliverables, interfaces, number of sites, data volume, or acceptance criteria shall be documented as a Change Request with business justification and impact assessment.\n\n## 18. Definition of Done\nThe project will be considered complete when all agreed deliverables have been accepted, all three deployment waves are operational, required data migration has been completed and reconciled, required integrations are operational, UAT has been completed, knowledge transfer is complete, operational documentation has been delivered, hypercare is complete, open items have owners and target dates, and final project acceptance has been obtained.'
 
 
 def get_secret(name: str, default: str = "") -> str:
@@ -86,17 +29,14 @@ def get_secret(name: str, default: str = "") -> str:
         return default
 
 
-def _coverage(plan: dict) -> tuple[int, int, float]:
-    sow_items = plan.get("sow_items", [])
-    executable = [x for x in sow_items if x.get("executable")]
-    trace = plan.get("traceability", [])
-    mapped = sum(1 for x in trace if x.get("status") == "Mapped")
-    pct = round(mapped / len(executable) * 100, 1) if executable else 100.0
-    return mapped, len(executable), pct
+@st.cache_resource
+def database():
+    return init_db(get_secret("DATABASE_URL", ""))
 
 
-def _df(items: list[dict]) -> pd.DataFrame:
-    return pd.DataFrame(items) if items else pd.DataFrame([{"Info": "No records"}])
+def _coverage(plan: dict) -> float:
+    meta = plan.get("metadata", {})
+    return float(meta.get("traceability_coverage_percent", 0))
 
 
 def show_plan(plan: dict) -> None:
@@ -104,80 +44,98 @@ def show_plan(plan: dict) -> None:
     sow_items = plan.get("sow_items", [])
     activities = plan.get("activities", [])
     milestones = plan.get("milestones", [])
+    traceability = plan.get("traceability", [])
     gaps = plan.get("gaps", [])
     risks = plan.get("risks", [])
     assumptions = plan.get("assumptions", [])
     constraints = plan.get("constraints", [])
-    traceability = plan.get("traceability", [])
-    mapped, executable_count, coverage = _coverage(plan)
 
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("SOW items", len(sow_items))
     c2.metric("Activities", len(activities))
     c3.metric("Milestones", len(milestones))
-    c4.metric("Gaps / Risks", len(gaps) + len(risks))
-    c5.metric("Executable coverage", f"{coverage}%")
+    c4.metric("Gaps", len(gaps))
+    c5.metric("Executable coverage", f"{_coverage(plan):g}%")
 
     st.divider()
     st.subheader("Project summary")
     st.write(summary.get("description") or "No summary returned.")
     st.caption(
         f"Project type: {summary.get('project_type', 'Unknown')} · "
-        f"Planning confidence: {summary.get('confidence', 'N/A')} · "
-        f"Mapped executable SOW items: {mapped}/{executable_count}"
+        f"Planning confidence: {summary.get('confidence', 'N/A')}"
     )
 
-    tabs = st.tabs(["Project Plan", "SOW Items", "Traceability", "Gaps & Risks", "Assumptions", "Raw JSON"])
+    tabs = st.tabs([
+        "Project Plan", "WBS", "Milestones", "SOW Items", "Traceability",
+        "Gaps", "Risks", "Assumptions", "Raw JSON"
+    ])
 
     with tabs[0]:
-        if activities:
-            df = pd.DataFrame(activities)
-            cols = ["wbs_id", "activity_id", "activity_name", "phase", "duration_days", "dependency_ids", "owner_role", "deliverable", "milestone", "source_sow_ids", "planning_note"]
+        df = pd.DataFrame(activities)
+        if not df.empty:
+            cols = ["wbs_id","activity_id","activity_name","phase","duration_days","dependency_ids","owner_role",
+                    "deliverable","milestone","source_sow_ids","planning_note","start_week","finish_week"]
             visible = [c for c in cols if c in df.columns]
             st.dataframe(df[visible], use_container_width=True, hide_index=True)
         else:
             st.info("No executable activities were generated.")
-        st.markdown("#### Milestones")
-        st.dataframe(_df(milestones), use_container_width=True, hide_index=True)
 
     with tabs[1]:
-        if sow_items:
-            cols = ["sow_id", "section", "statement", "type", "category", "executable", "explicit", "priority"]
-            sdf = pd.DataFrame(sow_items)
-            visible = [c for c in cols if c in sdf.columns]
-            st.dataframe(sdf[visible], use_container_width=True, hide_index=True)
+        wdf = pd.DataFrame(plan.get("wbs", []))
+        if not wdf.empty:
+            st.dataframe(wdf, use_container_width=True, hide_index=True)
+        else:
+            st.info("No WBS phases were generated.")
+
+    with tabs[2]:
+        mdf = pd.DataFrame(milestones)
+        if not mdf.empty:
+            st.dataframe(mdf, use_container_width=True, hide_index=True)
+        else:
+            st.info("No milestones were identified.")
+
+    with tabs[3]:
+        sdf = pd.DataFrame(sow_items)
+        if not sdf.empty:
+            st.dataframe(sdf, use_container_width=True, hide_index=True)
         else:
             st.info("No SOW items were extracted.")
 
-    with tabs[2]:
-        if traceability:
-            td = pd.DataFrame(traceability)
-            st.dataframe(td, use_container_width=True, hide_index=True)
-            unmapped = td[td.get("status", "") == "Unmapped"] if "status" in td.columns else pd.DataFrame()
-            if not unmapped.empty:
-                st.warning(f"{len(unmapped)} executable SOW item(s) need PM review.")
+    with tabs[4]:
+        tdf = pd.DataFrame(traceability)
+        if not tdf.empty:
+            st.dataframe(tdf, use_container_width=True, hide_index=True)
+            controlled = int((tdf["status"] != "Mapped").sum()) if "status" in tdf else 0
+            st.caption(f"{controlled} non-executable/controlled items require tracking outside the executable schedule.")
         else:
             st.info("No traceability records were generated.")
 
-    with tabs[3]:
-        st.markdown("#### Gaps")
-        st.dataframe(_df(gaps), use_container_width=True, hide_index=True)
-        st.markdown("#### Risks")
-        st.dataframe(_df(risks), use_container_width=True, hide_index=True)
-
-    with tabs[4]:
-        st.markdown("#### Assumptions")
-        if assumptions and isinstance(assumptions[0], dict):
-            st.dataframe(_df(assumptions), use_container_width=True, hide_index=True)
-        else:
-            st.write(assumptions or ["No assumptions returned."])
-        st.markdown("#### Constraints / Dependencies")
-        if constraints and isinstance(constraints[0], dict):
-            st.dataframe(_df(constraints), use_container_width=True, hide_index=True)
-        else:
-            st.write(constraints or ["No constraints returned."])
-
     with tabs[5]:
+        gdf = pd.DataFrame(gaps)
+        if not gdf.empty:
+            st.dataframe(gdf, use_container_width=True, hide_index=True)
+        else:
+            st.success("No planning gaps were identified.")
+
+    with tabs[6]:
+        rdf = pd.DataFrame(risks)
+        if not rdf.empty:
+            st.dataframe(rdf, use_container_width=True, hide_index=True)
+        else:
+            st.success("No planning risks were identified.")
+
+    with tabs[7]:
+        adf = pd.DataFrame(assumptions)
+        if not adf.empty:
+            st.dataframe(adf, use_container_width=True, hide_index=True)
+        else:
+            st.info("No explicit assumptions were extracted.")
+        cdf = pd.DataFrame(constraints)
+        if not cdf.empty:
+            st.markdown("#### Constraints")
+            st.dataframe(cdf, use_container_width=True, hide_index=True)
+
+    with tabs[8]:
         st.json(plan)
 
     excel_bytes = build_excel_workbook(plan)
@@ -189,46 +147,68 @@ def show_plan(plan: dict) -> None:
     )
 
 
-def show_footer(visit_count: int) -> None:
+VISIT_COUNTER_URL = "https://abacus.jasoncameron.dev/hit/sow-to-project-planner.streamlit.app/visits"
+
+
+def record_external_visit() -> int | None:
+    """Increment a lightweight external visit counter. Returns None on failure."""
+    response = requests.get(VISIT_COUNTER_URL, timeout=5)
+    response.raise_for_status()
+    payload = response.json()
+    value = payload.get("value")
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def show_footer(visit_count: int | None) -> None:
     st.markdown("---")
     st.markdown("**Projects**")
     st.markdown(
-        '[SOW → Project Planner](#) | '
-        '[GxP AI Readiness & Governance Assessment](https://gxp-ai-readiness-governance.streamlit.app/) | '
-        '[AI Risk & Issue Dashboard](https://ai-risk-issue-dashboard.streamlit.app/)'
+        "[SOW → Project Planner](#) · "
+        "[GxP AI Readiness & Governance Assessment](https://gxp-ai-readiness-governance.streamlit.app/) · "
+        "[AI Risk & Issue Dashboard](https://ai-risk-issue-dashboard.streamlit.app/)"
     )
     st.markdown("© 2026 Sriram Sampath. All rights reserved.")
-    st.markdown('[LinkedIn](https://www.linkedin.com/in/sriramsampath81/)')
-    st.caption(f"👁️ Visits: {visit_count}")
+    st.markdown("[LinkedIn](https://www.linkedin.com/in/sriramsampath81/)")
+    if visit_count is None:
+        st.caption("👁️ Visits: —")
+    else:
+        st.caption(f"👁️ Visits: {visit_count}")
 
 
 def main() -> None:
-    db = database()
-    if "visit_recorded" not in st.session_state:
-        try:
-            st.session_state["visit_count"] = record_visit(db)
-        except Exception:
-            st.session_state["visit_count"] = 0
-        st.session_state["visit_recorded"] = True
-
     st.title("📋 SOW → Project Planner")
     st.caption("AI-assisted, domain-agnostic project planning. The AI proposes; the Project Manager decides.")
+
+    # Wake-up traffic must not be counted as a human page visit.
     if st.query_params.get("bot") == "wake":
         st.success("App is awake.")
         st.stop()
 
-    groq_cfg = get_groq_config(
+    db = database()
+
+    # Use the same lightweight external counter pattern as the existing Risk & Issue Dashboard.
+    # Count once per browser session; wake-up bot requests are excluded above.
+    if "visit_recorded" not in st.session_state:
+        try:
+            st.session_state["visit_count"] = record_external_visit()
+        except Exception:
+            st.session_state["visit_count"] = None
+        st.session_state["visit_recorded"] = True
+
+    cfg = get_groq_config(
         api_key=get_secret("GROQ_API_KEY", ""),
         model=get_secret("GROQ_MODEL", "qwen/qwen3.8-27b"),
         base_url=get_secret("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
     )
-    use_ai = bool(groq_cfg.api_key)
 
     projects = list_projects(db)
     with st.sidebar:
         st.markdown("**Saved projects**")
         if projects:
-            choice = st.selectbox("Open project", options=["—"] + [p["label"] for p in projects], label_visibility="collapsed")
+            choice = st.selectbox("Open project", ["—"] + [p["label"] for p in projects], label_visibility="collapsed")
             if choice != "—":
                 selected = next(p for p in projects if p["label"] == choice)
                 loaded = load_project(db, selected["id"])
@@ -239,34 +219,41 @@ def main() -> None:
         else:
             st.caption("No saved projects yet.")
 
-    st.markdown("### Test with the built-in sample")
-    if st.button("🧪 Load Complex Enterprise SOW"):
-        st.session_state["sample_loaded"] = True
-        st.session_state["pasted_sow"] = SAMPLE_SOW
-        st.session_state["project_name"] = "Enterprise Digital Operations Platform"
-    if st.session_state.get("sample_loaded"):
-        st.info("Built-in complex enterprise SOW loaded. Review it below, then click Generate Project Plan.")
+        st.markdown("---")
+        if st.button("🧪 Load Complex Sample SOW", use_container_width=True):
+            st.session_state["project_name"] = "Enterprise Digital Operations Platform"
+            st.session_state["sow_text"] = COMPLEX_SAMPLE_SOW
 
-    left, right = st.columns([1, 1])
-    with left:
-        project_name = st.text_input("Project name", value=st.session_state.get("project_name", ""), placeholder="e.g. CRM Implementation")
-        uploaded = st.file_uploader("Upload SOW", type=["pdf", "docx", "xlsx", "xlsm", "txt", "md"])
-    with right:
-        pasted = st.text_area("Or paste SOW text", value=st.session_state.get("pasted_sow", ""), key="pasted_sow", height=300, placeholder="Paste the SOW here or load the built-in complex sample...")
+    project_name = st.text_input(
+        "Project name",
+        value=st.session_state.get("project_name", ""),
+        placeholder="e.g. CRM Implementation",
+    )
+    sow_text = st.text_area(
+        "Statement of Work",
+        value=st.session_state.get("sow_text", ""),
+        height=320,
+        placeholder="Upload an SOW below or paste the SOW here...",
+    )
+    st.session_state["sow_text"] = sow_text
 
+    uploaded = st.file_uploader("Upload SOW", type=["pdf","docx","xlsx","xlsm","txt","md"])
+    extracted_text = sow_text.strip()
     if uploaded is not None:
         try:
             extracted_text = extract_document(uploaded.getvalue(), uploaded.name)
             st.info(f"Extracted {len(extracted_text):,} characters from `{uploaded.name}`.")
             with st.expander("Preview extracted text"):
                 st.text(extracted_text[:12000])
+            st.session_state["sow_text"] = extracted_text
         except Exception as exc:
-            extracted_text = ""
             st.error(f"Document extraction failed: {exc}")
-    else:
-        extracted_text = pasted.strip()
 
     generate = st.button("🚀 Generate Project Plan", type="primary", use_container_width=True)
+
+    if "plan" in st.session_state and not generate:
+        show_plan(st.session_state["plan"])
+
     if generate:
         if not project_name.strip():
             st.error("Enter a project name.")
@@ -274,29 +261,38 @@ def main() -> None:
         if not extracted_text.strip():
             st.error("Upload an SOW or paste SOW text.")
             st.stop()
+
         with st.spinner("Analyzing the SOW and building the project plan..."):
-            source = uploaded.name if uploaded else "Pasted SOW"
-            if use_ai:
+            plan = build_deterministic_plan(extracted_text, project_name.strip())
+            engine = "Built-in planning engine"
+            if cfg.api_key:
                 try:
-                    plan = generate_plan_with_groq(extracted_text, project_name, groq_cfg)
-                    engine = "Groq AI planner"
+                    ai_advice = generate_ai_advice(plan["sow_items"], project_name.strip(), cfg)
+                    plan = merge_ai_advice(plan, ai_advice)
+                    plan["metadata"]["engine"] = "groq_qwen38_hybrid"
+                    plan["metadata"]["engine_version"] = "planner-v4 + groq-qwen38-advice"
+                    engine = "Groq AI planner + planning engine"
                 except Exception as exc:
-                    st.warning(f"Groq AI planning was unavailable, so the built-in planner was used instead. Details: {exc}")
-                    plan = build_fallback_plan(extracted_text, project_name)
-                    engine = "Built-in planner"
-            else:
-                plan = build_fallback_plan(extracted_text, project_name)
-                engine = "Built-in planner"
+                    # Keep the high-quality deterministic plan. Do not replace it with a weaker fallback.
+                    plan["metadata"]["ai_error"] = str(exc)[:1000]
+                    st.warning("AI assistance was unavailable for this run. A full deterministic project plan was generated instead.")
             plan = validate_and_normalize_plan(plan)
-            project_id = create_project(db, name=project_name.strip(), source_name=source, plan=plan, engine_name=engine)
+            create_project(
+                db,
+                name=project_name.strip(),
+                source_name=uploaded.name if uploaded else "Pasted SOW",
+                plan=plan,
+                engine_name=engine,
+            )
             st.session_state["plan"] = plan
             st.session_state["project_name"] = project_name.strip()
-            st.session_state["project_id"] = project_id
             st.session_state["generated_at"] = datetime.now(timezone.utc).isoformat()
+
         st.success(f"Project plan created and saved. {engine}")
 
     if "plan" in st.session_state:
         show_plan(st.session_state["plan"])
+
     show_footer(st.session_state.get("visit_count", 0))
 
 

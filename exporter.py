@@ -1,60 +1,101 @@
+
 from __future__ import annotations
 
 from io import BytesIO
+import json
 
-import pandas as pd
-from openpyxl import load_workbook
-from openpyxl.styles import Font, PatternFill
-from openpyxl.utils import get_column_letter
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
 
 
-def _frame(items):
-    if not items:
-        return pd.DataFrame([{"Info": "No records"}])
-    if items and not isinstance(items[0], dict):
-        return pd.DataFrame({"Value": items})
-    return pd.DataFrame(items)
+HEADER_FILL = PatternFill("solid", fgColor="D9EAF7")
+HEADER_FONT = Font(bold=True)
+
+
+def _sheet(wb, name, headers, rows):
+    ws = wb.create_sheet(name)
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.fill = HEADER_FILL
+        cell.font = HEADER_FONT
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    for row in rows:
+        ws.append(row)
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    widths = {}
+    for row in ws.iter_rows():
+        for cell in row:
+            widths[cell.column_letter] = min(max(widths.get(cell.column_letter, 0), len(str(cell.value or "")) + 2), 45)
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+    for col, width in widths.items():
+        ws.column_dimensions[col].width = width
+    return ws
 
 
 def build_excel_workbook(plan: dict) -> bytes:
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        summary = plan.get("summary", {})
-        metadata = plan.get("metadata", {})
-        pd.DataFrame(
-            [
-                ["Project Name", summary.get("project_name", "")],
-                ["Project Type", summary.get("project_type", "")],
-                ["Description", summary.get("description", "")],
-                ["Planning Confidence", summary.get("confidence", "")],
-                ["Planning Engine", metadata.get("engine", "")],
-                ["Schema Version", metadata.get("schema_version", "")],
-                ["Executable SOW Items", metadata.get("executable_sow_items", "")],
-                ["Traceability Coverage", metadata.get("traceability_coverage", "")],
-            ],
-            columns=["Field", "Value"],
-        ).to_excel(writer, sheet_name="Project Summary", index=False)
-        _frame(plan.get("sow_items", [])).to_excel(writer, sheet_name="SOW Items", index=False)
-        _frame(plan.get("wbs", [])).to_excel(writer, sheet_name="WBS", index=False)
-        _frame(plan.get("activities", [])).to_excel(writer, sheet_name="Project Plan", index=False)
-        _frame(plan.get("milestones", [])).to_excel(writer, sheet_name="Milestones", index=False)
-        _frame(plan.get("traceability", [])).to_excel(writer, sheet_name="Traceability", index=False)
-        _frame(plan.get("gaps", [])).to_excel(writer, sheet_name="Gaps", index=False)
-        _frame(plan.get("risks", [])).to_excel(writer, sheet_name="Risks", index=False)
-        _frame(plan.get("assumptions", [])).to_excel(writer, sheet_name="Assumptions", index=False)
-        _frame(plan.get("constraints", [])).to_excel(writer, sheet_name="Constraints", index=False)
-    output.seek(0)
-    wb = load_workbook(output)
-    for ws in wb.worksheets:
-        ws.freeze_panes = "A2"
-        ws.auto_filter.ref = ws.dimensions
-        for cell in ws[1]:
-            cell.font = Font(bold=True)
-            cell.fill = PatternFill(fill_type="solid", fgColor="D9EAF7")
-        for col_idx, column_cells in enumerate(ws.columns, 1):
-            max_len = min(max((len(str(c.value)) if c.value is not None else 0) for c in column_cells) + 2, 60)
-            ws.column_dimensions[get_column_letter(col_idx)].width = max(12, max_len)
-    final = BytesIO()
-    wb.save(final)
-    final.seek(0)
-    return final.getvalue()
+    wb = Workbook()
+    default = wb.active
+    wb.remove(default)
+
+    s = plan.get("summary", {})
+    _sheet(wb, "Project Summary", ["Field", "Value"], [
+        ["Project Name", s.get("project_name", "")],
+        ["Project Type", s.get("project_type", "")],
+        ["Description", s.get("description", "")],
+        ["Confidence", s.get("confidence", "")],
+        ["Engine", plan.get("metadata", {}).get("engine", "")],
+        ["Traceability Coverage", f"{plan.get('metadata', {}).get('traceability_coverage_percent', 0)}%"],
+    ])
+
+    _sheet(wb, "SOW Items",
+           ["SOW ID","Section","Statement","Type","Executable","Priority"],
+           [[x.get("sow_id"),x.get("section"),x.get("statement"),x.get("type"),x.get("executable"),x.get("priority")] for x in plan.get("sow_items",[])])
+
+    _sheet(wb, "WBS", ["WBS ID","Phase","Objective"], [
+        [x.get("wbs_id"),x.get("phase"),x.get("objective")] for x in plan.get("wbs",[])
+    ])
+
+    _sheet(wb, "Project Plan",
+           ["WBS","Activity ID","Activity","Phase","Duration (days)","Dependencies","Owner","Deliverable","Milestone","Source SOW IDs","Planning Basis"],
+           [[x.get("wbs_id"),x.get("activity_id"),x.get("activity_name"),x.get("phase"),x.get("duration_days"),
+             ", ".join(x.get("dependency_ids",[])),x.get("owner_role"),x.get("deliverable"),x.get("milestone"),
+             ", ".join(x.get("source_sow_ids",[])),x.get("planning_note")] for x in plan.get("activities",[])])
+
+    _sheet(wb, "Milestones", ["ID","Name","Target","Source","Source SOW IDs"], [
+        [x.get("milestone_id"),x.get("name"),x.get("target"),x.get("source"),", ".join(x.get("source_sow_ids",[]))]
+        for x in plan.get("milestones",[])
+    ])
+
+    _sheet(wb, "Traceability", ["SOW ID","Item Type","Executable","Activity IDs","Milestone IDs","Status","Reason"], [
+        [x.get("sow_id"),x.get("item_type"),x.get("executable"),", ".join(x.get("activity_ids",[])),
+         ", ".join(x.get("milestone_ids",[])),x.get("status"),x.get("reason")] for x in plan.get("traceability",[])
+    ])
+
+    _sheet(wb, "Gaps", ["ID","Category","Description","Severity","Recommendation","Source SOW IDs"], [
+        [x.get("gap_id"),x.get("category"),x.get("description"),x.get("severity"),x.get("recommendation"),", ".join(x.get("source_sow_ids",[]))]
+        for x in plan.get("gaps",[])
+    ])
+
+    _sheet(wb, "Risks", ["ID","Risk","Impact","Probability","Mitigation","Source SOW IDs"], [
+        [x.get("risk_id"),x.get("risk"),x.get("impact"),x.get("probability"),x.get("mitigation"),", ".join(x.get("source_sow_ids",[]))]
+        for x in plan.get("risks",[])
+    ])
+
+    _sheet(wb, "Assumptions", ["ID","Assumption","Basis","Status","Source SOW IDs"], [
+        [x.get("assumption_id"),x.get("assumption"),x.get("basis"),x.get("status"),", ".join(x.get("source_sow_ids",[]))]
+        for x in plan.get("assumptions",[])
+    ])
+
+    _sheet(wb, "Constraints", ["ID","Constraint","Source SOW IDs"], [
+        [x.get("constraint_id"),x.get("constraint"),", ".join(x.get("source_sow_ids",[]))]
+        for x in plan.get("constraints",[])
+    ])
+
+    _sheet(wb, "Raw JSON", ["Section","JSON"], [
+        ["Plan", json.dumps(plan, ensure_ascii=False)]
+    ])
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()

@@ -1,51 +1,24 @@
 # SOW → Project Planner
 
-A domain-agnostic Streamlit application that transforms a Statement of Work into an AI-assisted project plan.
+Domain-agnostic Streamlit application that converts an SOW into a PM-reviewable project plan.
 
-## Features
+## Design
+AI provides compact planning advice; the deterministic planning engine owns the executable schedule, WBS, milestones, traceability and quality registers.
 
-- PDF, DOCX, XLSX/XLSM, TXT and Markdown SOW input
-- Qwen 3.8 27B through Groq
-- SOW item extraction
-- WBS generation
-- Activities and dependencies
-- Milestones
-- Assumptions and constraints
-- Gaps and planning risks
-- SOW-to-activity traceability
-- Excel export
-- Saved project history
-- PostgreSQL-ready database layer with SQLite fallback
-- Selenium wake-up script for scheduled automation
-
-## Streamlit Cloud
-
-Deploy `app.py` from this repository.
-
-Required Streamlit secret for AI:
-
+## Required Streamlit Secret
 ```toml
-GROQ_API_KEY = "..."
+GROQ_API_KEY = "your-rotated-key"
 GROQ_MODEL = "qwen/qwen3.8-27b"
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 ```
 
-Optional persistent database:
+`DATABASE_URL` is optional. Without it the app uses SQLite locally/runtime. With it the same data layer can use PostgreSQL.
 
-```toml
-DATABASE_URL = "postgresql://user:password@host:5432/dbname"
-```
+## Deployment
+Deploy `app.py` from the repository root in Streamlit Community Cloud.
 
-If `DATABASE_URL` is omitted, the app uses local SQLite. Streamlit Community Cloud does not guarantee persistence of local files across restarts, so use hosted PostgreSQL when saved project history must persist.
+## Keep-awake
+`wake_streamlit.py` can be run by a GitHub Actions scheduled workflow. The workflow file is intentionally kept out of the repository root because GitHub requires `.github/workflows/`. A copy/paste workflow is provided in `KEEP_AWAKE_WORKFLOW.yml.txt`.
 
-## Wake-up automation
-
-`wake_streamlit.py` contains the Selenium wake-up logic. It expects the environment variable `STREAMLIT_APP_URL` to contain the deployed app URL, including `?bot=wake`.
-
-For scheduled execution, place the script in a GitHub Actions workflow and store the URL as an Actions secret.
-
-## Design principle
-
-The AI proposes. The Project Manager reviews and decides.
-
-The SOW is the source of truth. Inferred planning content is explicitly treated as a proposal or assumption rather than a contractual commitment.
+## Visit counter
+The footer uses the same lightweight external counter pattern as the existing Risk & Issue Dashboard. It counts once per browser session and does not depend on the project database. If the counter service is unavailable, the UI shows `—` rather than falsely showing `0`.

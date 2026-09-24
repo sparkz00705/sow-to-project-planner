@@ -1,43 +1,43 @@
-from __future__ import annotations
 
 import os
 import time
-
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-
-URL = os.environ.get("STREAMLIT_APP_URL", "").strip()
-if not URL:
-    raise SystemExit("STREAMLIT_APP_URL GitHub Actions secret is not set.")
-
-options = Options()
-options.add_argument("--headless=new")
-options.add_argument("--no-sandbox")
-options.add_argument("--disable-dev-shm-usage")
-options.add_argument("--window-size=1440,1000")
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 
-def main() -> None:
+STREAMLIT_URL = os.environ.get("STREAMLIT_APP_URL", "").strip()
+
+
+def main():
+    if not STREAMLIT_URL:
+        raise RuntimeError("STREAMLIT_APP_URL is not configured.")
+
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+
     driver = webdriver.Chrome(options=options)
     try:
-        print(f"Opening {URL}")
-        driver.get(URL)
-        time.sleep(5)
-
-        buttons = driver.find_elements(By.TAG_NAME, "button")
-        clicked = False
-        for button in buttons:
-            text = (button.text or "").strip().lower()
-            if "get this app back up" in text or "yes, get this app back up" in text:
-                print("Wake-up button found; clicking it.")
+        driver.get(STREAMLIT_URL)
+        time.sleep(4)
+        buttons = [
+            "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'get this app back up')]",
+            "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'wake')]",
+        ]
+        for xpath in buttons:
+            try:
+                button = WebDriverWait(driver, 6).until(EC.element_to_be_clickable((By.XPATH, xpath)))
                 button.click()
-                clicked = True
                 time.sleep(5)
-                break
-
-        if not clicked:
-            print("No wake-up button found. The app is probably already awake.")
+                print("Wake-up action completed.")
+                return
+            except Exception:
+                continue
+        print("No wake-up button found; app is likely already awake.")
     finally:
         driver.quit()
 

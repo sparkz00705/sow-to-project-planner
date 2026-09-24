@@ -187,105 +187,138 @@ def _week_number(value: object) -> int | None:
 def _schedule_review(plan: dict) -> list[dict[str, object]]:
     """Compare every explicit SOW milestone with the dependency-driven activity plan.
 
-    Leadership reporting must never silently drop an explicit milestone. When a
-    milestone cannot be mapped to an activity, it is returned as ``Unmapped`` so
-    the gap is visible rather than hidden.
+    Leadership reporting must not create false unmapped milestones merely because
+    the SOW uses a different wording from the generated activity. Matching priority:
+    1) shared SOW source ID, 2) milestone-specific planning synonyms, 3) token overlap.
     """
-    rules = [
-        ("project kickoff", ["project kickoff"]),
-        ("discovery complete", ["discovery and current-state"]),
-        ("requirements sign-off", ["requirements sign-off"]),
-        ("future-state design approved", ["future-state processes"]),
-        ("solution design approved", ["solution architecture"]),
-        ("configuration complete", ["configure platform"]),
-        (
-            "integration build complete",
-            [
-                "erp and enterprise-system integrations",
-                "identity, sso",
-                "document, email",
-                "enterprise-system integrations",
-            ],
-        ),
-        ("trial data migration complete", ["trial migration"]),
-        ("sit complete", ["system integration testing"]),
-        ("uat readiness", ["test strategy and test plan"]),
-        ("uat complete", ["business acceptance", "uat sign-off"]),
-        ("wave 1 go-live", ["wave 1 production"]),
-        ("wave 2 go-live", ["wave 2 production"]),
-        ("wave 3 go-live", ["wave 3 production"]),
-        ("hypercare complete", ["hypercare"]),
-    ]
+    synonym_rules = {
+        "project kickoff": ["kickoff", "charter"],
+        "discovery complete": ["discovery", "current-state", "assessment"],
+        "requirements sign-off": ["requirements", "requirement", "validate requirements", "approved requirements"],
+        "requirements approved": ["requirements", "requirement", "validate requirements", "approved requirements"],
+        "future-state design approved": ["future-state", "future state", "process design", "workflow", "approval rules"],
+        "solution design approved": ["solution architecture", "solution design", "technical design", "architecture"],
+        "configuration complete": ["configure", "configuration", "platform workflows", "roles", "reporting"],
+        "integration build complete": ["integration", "erp", "enterprise-system", "sso", "identity"],
+        "source data received": ["source data", "data extract", "data profiling", "historical data", "migration data"],
+        "trial data migration complete": ["trial migration", "rehearsal", "migration"],
+        "sit complete": ["system integration testing", "sit", "functional testing"],
+        "uat readiness": ["test strategy", "test plan", "uat readiness", "readiness"],
+        "uat complete": ["uat", "business acceptance", "uat sign-off", "acceptance"],
+        "production go-live": ["production deployment", "go-live", "deploy", "cutover"],
+        "wave 1 go-live": ["wave 1 production", "wave 1", "production deployment"],
+        "wave 2 go-live": ["wave 2 production", "wave 2", "production deployment"],
+        "wave 3 go-live": ["wave 3 production", "wave 3", "production deployment"],
+        "hypercare complete": ["hypercare", "stabilize production", "post-go-live support", "stabilization"],
+    }
 
-    rows: list[dict[str, object]] = []
+    def norm(text: object) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip()
+
+    def terms_for(name: str) -> list[str]:
+        n = norm(name)
+        for label, terms in synonym_rules.items():
+            if label in n:
+                return terms
+        # Generic normalization for names such as "UAT Approval" or
+        # "Production Deployment" that are not exact canonical labels.
+        terms = [t for t in n.split() if len(t) > 2]
+        return terms
+
     activities = plan.get("activities", []) or []
     explicit_milestones = [
         m for m in (plan.get("milestones", []) or [])
         if m.get("source") == "Explicit SOW milestone"
     ]
 
+    rows: list[dict[str, object]] = []
     for milestone in explicit_milestones:
         target = _week_number(milestone.get("target"))
+        milestone_name = str(milestone.get("name", "")).strip()
+        source_ids = set(milestone.get("source_sow_ids", []) or [])
         if target is None:
-            rows.append(
-                {
-                    "Milestone": milestone.get("name", ""),
-                    "SOW target": milestone.get("target", "—"),
-                    "Planned finish": "—",
-                    "Variance (weeks)": None,
-                    "Status": "Unmapped",
-                }
-            )
+            rows.append({
+                "Milestone": milestone_name,
+                "SOW target": milestone.get("target", "—"),
+                "Planned finish": "—",
+                "Variance (weeks)": None,
+                "Status": "Unmapped",
+                "Match basis": "No explicit week target",
+            })
             continue
 
-        name = str(milestone.get("name", "")).strip().lower()
-        keywords = next((terms for label, terms in rules if label in name), None)
-        if not keywords:
-            rows.append(
-                {
-                    "Milestone": milestone.get("name", ""),
-                    "SOW target": f"Week {target}",
-                    "Planned finish": "—",
-                    "Variance (weeks)": None,
-                    "Status": "Unmapped",
-                }
-            )
-            continue
+        name_lower = norm(milestone_name)
+        preferred_terms = [norm(t) for t in terms_for(milestone_name) if norm(t)]
 
-        candidates = [
-            a
-            for a in activities
-            if any(term in str(a.get("activity_name", "")).lower() for term in keywords)
-        ]
-        if not candidates:
-            rows.append(
-                {
-                    "Milestone": milestone.get("name", ""),
-                    "SOW target": f"Week {target}",
-                    "Planned finish": "—",
-                    "Variance (weeks)": None,
-                    "Status": "Unmapped",
-                }
-            )
-            continue
+        scored: list[tuple[int, int, dict]] = []
+        for activity in activities:
+            activity_name = norm(activity.get("activity_name", ""))
+            deliverable = norm(activity.get("deliverable", ""))
+            phase = norm(activity.get("phase", ""))
+            activity_source_ids = set(activity.get("source_sow_ids", []) or [])
+            searchable = f"{activity_name} {deliverable} {phase}".strip()
 
-        planned_finish = max(int(a.get("finish_week") or 0) for a in candidates)
-        variance = planned_finish - target
-        rows.append(
-            {
-                "Milestone": milestone.get("name", ""),
+            source_match = bool(source_ids & activity_source_ids)
+            semantic_hits = sum(1 for term in preferred_terms if term and term in searchable)
+            token_overlap = len(set(name_lower.split()) & set(searchable.split()))
+
+            # A shared source ID alone is not enough: a single "Major Milestones"
+            # SOW sentence can be the source for several different activities.
+            # Require at least one semantic/token link before using source evidence.
+            if source_match and semantic_hits:
+                score = 100 + semantic_hits * 10 + token_overlap
+                basis_rank = 3
+            elif semantic_hits:
+                score = 50 + semantic_hits * 10 + token_overlap
+                basis_rank = 2
+            elif token_overlap >= 1:
+                score = 10 + token_overlap
+                basis_rank = 1
+            else:
+                continue
+            scored.append((score, basis_rank, activity))
+
+        scored.sort(key=lambda x: (x[0], x[1], int(x[2].get("finish_week") or 0)), reverse=True)
+
+        if not scored:
+            rows.append({
+                "Milestone": milestone_name,
                 "SOW target": f"Week {target}",
-                "Planned finish": f"Week {planned_finish}" if planned_finish else "—",
-                "Variance (weeks)": variance,
-                "Status": (
-                    "Review"
-                    if variance > 1
-                    else "Aligned"
-                    if variance <= 0
-                    else "Watch"
-                ),
-            }
-        )
+                "Planned finish": "—",
+                "Variance (weeks)": None,
+                "Status": "Unmapped",
+                "Match basis": "No confident activity link",
+            })
+            continue
+
+        # Use the best evidence-backed activity. For a milestone such as
+        # "Integration Build Complete", multiple integration activities can exist;
+        # use the latest finish among activities that are tied to the same milestone
+        # semantics/source evidence.
+        best_score = scored[0][0]
+        best_rank = scored[0][1]
+        selected = [item[2] for item in scored if item[0] >= best_score - (10 if best_rank >= 2 else 0)]
+        planned_finish = max(int(a.get("finish_week") or 0) for a in selected)
+        variance = planned_finish - target
+        match_basis = {
+            3: "Shared SOW source ID",
+            2: "Planning-language match",
+            1: "Token match",
+        }[best_rank]
+        rows.append({
+            "Milestone": milestone_name,
+            "SOW target": f"Week {target}",
+            "Planned finish": f"Week {planned_finish}" if planned_finish else "—",
+            "Variance (weeks)": variance,
+            "Status": (
+                "Review"
+                if variance > 1
+                else "Aligned"
+                if variance <= 0
+                else "Watch"
+            ),
+            "Match basis": match_basis,
+        })
     return rows
 
 

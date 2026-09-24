@@ -759,7 +759,9 @@ def show_plan(plan: dict) -> None:
         st.write(leader_detail)
         st.caption("PM / sponsor approval is required before the plan is baselined.")
 
-        s1, s2, s3, s4 = st.columns(4)
+        # Use a 2 x 2 layout for decision metrics. Four narrow columns make
+        # leadership captions wrap poorly and can visually clip longer PMO language.
+        s1, s2 = st.columns(2, gap="large")
         schedule_label = f"{review_count} exception{'s' if review_count != 1 else ''}"
         s1.metric("Schedule", schedule_label)
         s1.caption(
@@ -775,6 +777,8 @@ def show_plan(plan: dict) -> None:
         s2.caption(
             "All SOW milestones mapped." if not unmapped_count else f"{unmapped_count} milestone(s) need mapping review."
         )
+
+        s3, s4 = st.columns(2, gap="large")
         s3.metric("High-severity gaps", high_gaps)
         s3.caption(f"of {leadership['gaps']} SOW/plan gaps")
         s4.metric("SOW risks", leadership["risks"])

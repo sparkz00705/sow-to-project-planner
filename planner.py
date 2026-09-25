@@ -6,7 +6,7 @@ import re
 from copy import deepcopy
 from typing import Any
 
-PLANNER_VERSION = "v9.0"
+PLANNER_VERSION = "v11.1"
 
 
 def _stable_id(prefix: str, text: str, index: int = 0) -> str:
@@ -380,7 +380,11 @@ def _add_activity(
             "milestone": milestone,
             "milestone_name": milestone_name or "",
             "source_sow_ids": list(source_ids),
-            "planning_note": "Deterministic planning recommendation derived from SOW evidence; PM review required.",
+            "planning_note": (
+                "SOW-linked planning recommendation; PM review required."
+                if source_ids
+                else "Planning-derived recommendation inferred from the SOW; no direct source statement matched; PM review required."
+            ),
         }
     )
     return aid
@@ -717,6 +721,7 @@ def _build_quality_records(
                     "severity": "High",
                     "recommendation": "Clarify and document the missing acceptance criterion, ownership or measurable target before baselining.",
                     "source_sow_ids": [row["sow_id"]],
+                    "origin": "SOW",
                 }
             )
             gap_idx += 1
@@ -1324,6 +1329,15 @@ def _reconcile_plan(plan: dict[str, Any]) -> dict[str, Any]:
         for dep in a.get("dependency_ids", []) or []:
             if dep not in activity_ids:
                 errors.append(f"Activity {a.get('activity_id')} references missing dependency {dep}.")
+        for sid in a.get("source_sow_ids", []) or []:
+            if str(sid) not in set(ids["sow_items"]):
+                errors.append(f"Activity {a.get('activity_id')} references missing SOW item {sid}.")
+        has_source = bool(a.get("source_sow_ids"))
+        planning_note = str(a.get("planning_note", "")).lower()
+        if has_source and "sow-linked" not in planning_note and "source linkage" not in planning_note:
+            warnings.append(f"Activity {a.get('activity_id')} has SOW sources but its planning basis is not explicitly marked SOW-linked.")
+        if not has_source and "planning-derived" not in planning_note:
+            errors.append(f"Activity {a.get('activity_id')} has no source SOW IDs and is not explicitly marked planning-derived.")
 
     sow_ids = set(ids["sow_items"])
     trace_sow_ids = {str(t.get("sow_id")) for t in trace if t.get("sow_id")}
@@ -1332,6 +1346,12 @@ def _reconcile_plan(plan: dict[str, Any]) -> dict[str, Any]:
     missing_trace = sorted(sow_ids - trace_sow_ids)
     if missing_trace:
         errors.append(f"{len(missing_trace)} SOW item(s) are missing from traceability.")
+    trace_by_id = {str(t.get("sow_id")): t for t in trace if t.get("sow_id")}
+    explicit_milestone_sids = {str(sid) for m in explicit_milestones for sid in (m.get("source_sow_ids") or []) if str(sid).strip()}
+    for sid in explicit_milestone_sids:
+        row = trace_by_id.get(sid, {})
+        if not row.get("milestone_ids"):
+            errors.append(f"Milestone SOW item {sid} has no milestone trace link.")
 
     source_structure = metadata.get("source_structure", {}) if isinstance(metadata.get("source_structure"), dict) else {}
     heading_leakage = int(source_structure.get("heading_leakage_count", 0) or 0)
@@ -1543,6 +1563,15 @@ def _ai_gap_is_unsupported(text: str, base_plan: dict[str, Any]) -> tuple[bool, 
     if "acceptance criterion" in item_types and ("success criteria" in lower or "acceptance criteria" in lower or "acceptance thresholds" in lower):
         return True, "Acceptance criteria are explicitly present in the SOW."
 
+    # Reject AI statements that merely restate a known SOW clarification.
+    # Example: an AI note about unspecified data volume duplicates the explicit
+    # SOW gap on exact migrated record volume and should not become a second gap.
+    sow_text = " ".join(str(i.get("statement", "")) for i in sow_items).lower()
+    if ("data volume" in lower or "record volume" in lower) and ("exact migrated record volume" in sow_text or "does not define exact migrated record volume" in sow_text):
+        return True, "Duplicates the explicit SOW clarification on migrated record volume."
+    if "legacy application" in lower and "legacy application a" in sow_text and "legacy application b" in sow_text:
+        return True, "The SOW identifies the legacy application sources at a defined level; the remaining data-volume ambiguity is already covered by the SOW gap register."
+
     sow_gaps = [g for g in base_plan.get("gaps", []) or [] if not _is_ai_row(g, "gap")]
     for gap in sow_gaps:
         if _advisory_overlap(text, str(gap.get("description", "")), kind="gap") >= 0.62:
@@ -1556,6 +1585,15 @@ def _filter_ai_risk(text: str, base_plan: dict[str, Any]) -> tuple[bool, str]:
             continue
         if _advisory_overlap(text, str(risk.get("risk", "")), kind="risk") >= 0.60:
             return True, f"Duplicates existing SOW risk {risk.get('risk_id', '')}."
+    return False, ""
+
+
+def _filter_ai_assumption(text: str, base_plan: dict[str, Any]) -> tuple[bool, str]:
+    for assumption in base_plan.get("assumptions", []) or []:
+        if _is_ai_row(assumption, "assumption"):
+            continue
+        if _advisory_overlap(text, str(assumption.get("assumption", "")), kind="assumption") >= 0.60:
+            return True, f"Duplicates existing SOW assumption {assumption.get('assumption_id', '')}."
     return False, ""
 
 
@@ -1623,12 +1661,17 @@ def merge_ai_advice(base_plan: dict[str, Any], ai: dict[str, Any] | None) -> dic
         text = _norm(raw)
         if not text or text.lower() in existing_advisory_assumption_text:
             continue
+        reject, reason = _filter_ai_assumption(text, result)
+        if reject:
+            rejections.append({"type": "assumption", "text": text, "reason": reason})
+            continue
         accepted_idx += 1
         result["ai_advisory_assumptions"].append(_build_ai_advisory_row("assumption", accepted_idx, text))
         existing_advisory_assumption_text.add(text.lower())
 
     metadata["ai_seed_used"] = True
     metadata["ai_advisory_rejections"] = rejections
+    metadata["ai_advisory_rejection_count"] = len(rejections)
     return _reconcile_plan(result)
 
 

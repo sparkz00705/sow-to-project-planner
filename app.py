@@ -192,6 +192,16 @@ Any requested change affecting scope, schedule, cost, resources, deliverables, i
 The project will be considered complete when all agreed deliverables have been accepted, all three deployment waves are operational, required data migration has been completed and reconciled, required integrations are operational, UAT has been completed, knowledge transfer is complete, operational documentation has been delivered, hypercare is complete, open items have owners and target dates, and final project acceptance has been obtained."""
 
 
+@st.cache_resource
+def database():
+    """Initialize the configured application database for the current Streamlit process."""
+    try:
+        database_url = st.secrets.get("DATABASE_URL", "")
+    except Exception:
+        database_url = ""
+    return init_db(str(database_url or ""))
+
+
 def show_footer(visit_count: int | None) -> None:
     st.markdown("---")
     st.markdown("**Projects**")

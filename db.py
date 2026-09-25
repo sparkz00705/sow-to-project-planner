@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import json
@@ -38,9 +37,7 @@ def init_db(database_url: str = "") -> dict[str, Any]:
             conn.close()
             return {"kind": "postgres", "url": url}
         except Exception:
-            # Safe fallback to SQLite.
             pass
-
     db_path = os.getenv("SOW_PLANNER_SQLITE_PATH", os.path.join("data", "planner.sqlite3"))
     os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
     conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -95,7 +92,6 @@ def create_project(db: dict[str, Any], name: str, source_name: str, plan: dict[s
             return int(pid)
         finally:
             conn.close()
-
     with _sqlite(_sqlite_path(db)) as conn:
         cur = conn.execute(
             "INSERT INTO projects (name, source_name, engine_name, plan_json, created_at) VALUES (?,?,?,?,?)",
@@ -115,7 +111,6 @@ def list_projects(db: dict[str, Any]) -> list[dict[str, Any]]:
         finally:
             conn.close()
         return [{"id": r[0], "label": f"{r[1]} — {r[2] or 'SOW'}", "name": r[1], "source_name": r[2], "created_at": str(r[3])} for r in rows]
-
     with _sqlite(_sqlite_path(db)) as conn:
         rows = conn.execute("SELECT id, name, source_name, created_at FROM projects ORDER BY id DESC").fetchall()
     return [{"id": r[0], "label": f"{r[1]} — {r[2] or 'SOW'}", "name": r[1], "source_name": r[2], "created_at": r[3]} for r in rows]
@@ -134,7 +129,6 @@ def load_project(db: dict[str, Any], project_id: int) -> dict[str, Any] | None:
         if not row:
             return None
         return {"id": row[0], "name": row[1], "source_name": row[2], "engine_name": row[3], "plan": json.loads(row[4]), "created_at": str(row[5])}
-
     with _sqlite(_sqlite_path(db)) as conn:
         row = conn.execute("SELECT id, name, source_name, engine_name, plan_json, created_at FROM projects WHERE id=?", (project_id,)).fetchone()
     if not row:
@@ -154,7 +148,6 @@ def record_visit(db: dict[str, Any]) -> int:
             return int(count)
         finally:
             conn.close()
-
     with _sqlite(_sqlite_path(db)) as conn:
         conn.execute("UPDATE app_visits SET visit_count = visit_count + 1 WHERE id=1")
         row = conn.execute("SELECT visit_count FROM app_visits WHERE id=1").fetchone()

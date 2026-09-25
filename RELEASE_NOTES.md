@@ -1,12 +1,15 @@
-# SOW → Project Planner v11.2
+# SOW → Project Planner v11.3 — Database/Visit Counter Hotfix
 
-## Visitor counter fix
-- Restores persistent visitor counting using the existing database `record_visit()` function.
-- Counts one visit per Streamlit session to avoid rerun inflation.
-- Excludes `?bot=wake` traffic.
-- The old external visitor-counter service is not used.
-- If analytics storage is unavailable, the app safely displays 0 without blocking the planner.
+## Fix
+- Restored the complete production `app.py` from the v11 release candidate.
+- Restored the cached `database()` function used by `main()`.
+- Reconnected visitor counting to the existing persistent `db.py` `record_visit()` function.
+- Removed the external visitor-counter HTTP dependency and `requests` import.
+- Counts one visit per Streamlit browser session and excludes `?bot=wake` traffic.
+- Visitor analytics failures cannot prevent the planner from loading.
+- Added visible runtime marker: Release v11.3.
 
-## Deployment
-Replace `app.py` and `planner.py` in the Streamlit-connected GitHub repository.
-The existing `db.py` must remain in place; it already provides `record_visit()`.
+## Validation
+- Python compilation: PASS
+- Static database-call check: PASS
+- Visitor-counter integration check: PASS

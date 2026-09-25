@@ -7,7 +7,7 @@ import pandas as pd
 import streamlit as st
 
 from ai import generate_ai_advice, get_groq_config
-from db import create_project, init_db
+from db import create_project, init_db, record_visit
 from exporter import build_excel_workbook
 from extract import extract_document
 from planner import (
@@ -192,9 +192,9 @@ Any requested change affecting scope, schedule, cost, resources, deliverables, i
 The project will be considered complete when all agreed deliverables have been accepted, all three deployment waves are operational, required data migration has been completed and reconciled, required integrations are operational, UAT has been completed, knowledge transfer is complete, operational documentation has been delivered, hypercare is complete, open items have owners and target dates, and final project acceptance has been obtained."""
 
 
-
 @st.cache_resource
 def database():
+    """Return the persistent application database handle."""
     return init_db(get_secret("DATABASE_URL", ""))
 
 
@@ -1146,7 +1146,7 @@ def show_plan(plan: dict) -> None:
     )
 
 
-def show_footer(visit_count: int = 0) -> None:
+def show_footer(visit_count: int | None) -> None:
     st.markdown("---")
     st.markdown("**Projects**")
     st.markdown(
@@ -1156,12 +1156,14 @@ def show_footer(visit_count: int = 0) -> None:
     )
     st.markdown("© 2026 Sriram Sampath. All rights reserved.")
     st.markdown("[LinkedIn](https://www.linkedin.com/in/sriramsampath81/)")
-    # Visitor counter is intentionally reset to a clean public-MVP baseline.
-    st.caption("👁️ Visits: 0")
+    # Show the persisted count when available; use an em dash only when
+    # analytics could not be recorded, so the UI never reports a false zero.
+    st.caption(f"👁️ Visits: {'—' if visit_count is None else visit_count}")
 
 
 def main() -> None:
     st.title("📋 SOW → Project Planner")
+    st.caption("Release v11.5")
     st.caption(
         "AI-assisted, domain-agnostic project planning. "
         "The AI proposes; the Project Manager decides."
@@ -1174,8 +1176,15 @@ def main() -> None:
 
     db = database()
 
-    # Visitor counter is intentionally reset to a clean public-MVP baseline.
-    st.session_state["visit_count"] = 0
+    # Count once per browser session; wake-up bot requests are excluded above.
+    if "visit_recorded" not in st.session_state:
+        try:
+            st.session_state["visit_count"] = record_visit(db)
+        except Exception:
+            # Visitor analytics must never prevent the planner from loading.
+            # Use None so the UI shows an em dash rather than a false zero.
+            st.session_state["visit_count"] = None
+        st.session_state["visit_recorded"] = True
 
     cfg = get_groq_config(
         api_key=get_secret("GROQ_API_KEY", ""),
@@ -1303,7 +1312,7 @@ def main() -> None:
 
     # IMPORTANT: default to None, not 0, so a failed counter does not appear as a
     # misleading zero.
-    show_footer(0)
+    show_footer(st.session_state.get("visit_count"))
 
 
 if __name__ == "__main__":

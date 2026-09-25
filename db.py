@@ -25,11 +25,11 @@ def init_db(database_url: str = "") -> dict[str, Any]:
                     plan_json TEXT NOT NULL,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
-                CREATE TABLE IF NOT EXISTS app_visits (
+                CREATE TABLE IF NOT EXISTS app_visit_counter_v2 (
                     id INTEGER PRIMARY KEY,
                     visit_count INTEGER NOT NULL
                 );
-                INSERT INTO app_visits (id, visit_count)
+                INSERT INTO app_visit_counter_v2 (id, visit_count)
                 VALUES (1, 0)
                 ON CONFLICT (id) DO NOTHING;
             """)
@@ -52,12 +52,12 @@ def init_db(database_url: str = "") -> dict[str, Any]:
         )
     """)
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS app_visits (
+        CREATE TABLE IF NOT EXISTS app_visit_counter_v2 (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             visit_count INTEGER NOT NULL
         )
     """)
-    conn.execute("INSERT OR IGNORE INTO app_visits (id, visit_count) VALUES (1, 0)")
+    conn.execute("INSERT OR IGNORE INTO app_visit_counter_v2 (id, visit_count) VALUES (1, 0)")
     conn.commit()
     conn.close()
     return {"kind": "sqlite", "path": db_path}
@@ -142,15 +142,15 @@ def record_visit(db: dict[str, Any]) -> int:
         conn = psycopg2.connect(db["url"])
         try:
             cur = conn.cursor()
-            cur.execute("UPDATE app_visits SET visit_count = visit_count + 1 WHERE id=1 RETURNING visit_count")
+            cur.execute("UPDATE app_visit_counter_v2 SET visit_count = visit_count + 1 WHERE id=1 RETURNING visit_count")
             count = cur.fetchone()[0]
             conn.commit()
             return int(count)
         finally:
             conn.close()
     with _sqlite(_sqlite_path(db)) as conn:
-        conn.execute("UPDATE app_visits SET visit_count = visit_count + 1 WHERE id=1")
-        row = conn.execute("SELECT visit_count FROM app_visits WHERE id=1").fetchone()
+        conn.execute("UPDATE app_visit_counter_v2 SET visit_count = visit_count + 1 WHERE id=1")
+        row = conn.execute("SELECT visit_count FROM app_visit_counter_v2 WHERE id=1").fetchone()
         return int(row[0])
 
 
